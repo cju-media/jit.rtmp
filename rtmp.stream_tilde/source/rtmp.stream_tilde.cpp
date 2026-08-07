@@ -145,6 +145,16 @@ public:
             drain_status();
             return atoms {};
         });
+        // Polls the internal jit.gl.asyncread helper's own registered readback
+        // matrix directly (see poll_gl_asyncread_frame()) rather than relying on
+        // its outlet - confirmed live that the internal hidden patch connection
+        // never actually delivers anything, so we don't depend on it at all now.
+        m_gl_poll_timer_ptr = std::make_unique<timer<>>(this, MIN_FUNCTION {
+            poll_gl_asyncread_frame();
+            if (m_gl_asyncread_box && m_streaming.load(std::memory_order_relaxed))
+                m_gl_poll_timer_ptr->delay(1000.0 / std::max(1.0, (double)fps));
+            return atoms {};
+        });
     }
 
     ~rtmp_stream() {
@@ -269,6 +279,7 @@ private:
     // === Internal jit.gl.asyncread helper (GL texture readback), main/Jitter thread only ===
     c74::max::t_object* m_gl_asyncread_box = nullptr;
     symbol          m_gl_asyncread_texture { "" };
+    symbol          m_gl_asyncread_out_name { "" }; // name of its internally-registered readback matrix; see poll_gl_asyncread_frame()
 
     // === Audio ring buffer (lock-free) ===
     audio_ring m_audio_ring;
@@ -288,6 +299,7 @@ private:
 
     status_mailbox              m_mailbox;
     std::unique_ptr<queue<>>    m_status_queue_ptr;
+    std::unique_ptr<timer<>>    m_gl_poll_timer_ptr;
 
     void post_status(const std::string& msg) {
         m_mailbox.post(msg);
@@ -417,8 +429,8 @@ private:
     // ourselves. This reuses Cycling'74's own (closed-source) implementation,
     // so we inherit correct GL-context/thread handling and PBO double-
     // buffering for free instead of reimplementing it against undocumented
-    // internals. Its output ("jit_matrix <name>") lands right back in our
-    // own jit_matrix handler above via a hidden patch cord we create once.
+    // internals. We read its output by polling its own registered readback
+    // matrix directly (see poll_gl_asyncread_frame()), not via its outlet.
     // -----------------------------------------------------------------
     int m_gl_texture_calls_logged = 0;
 
@@ -477,19 +489,63 @@ private:
         }
         c74::max::jbox_set_hidden(m_gl_asyncread_box, 1);
 
-        // NOTE: "hiddenconnect"'s success/failure return convention isn't in any
-        // public header we have (only the gensym'd symbol itself is - it's genuinely
-        // internal). Don't guess and tear the helper down on a merely-nonzero
-        // result, since that could just as easily be a valid non-null pointer to
-        // the created patchline on *success* - log it and let whether jit_matrix
-        // messages actually start arriving be the real signal (see handle_jit_matrix).
-        void* connect_result = c74::max::object_method(
-            patcher_obj, c74::max::gensym("hiddenconnect"), m_gl_asyncread_box, 0L, maxobj(), 0L
-        );
+        // Confirmed live: the "hiddenconnect" patchline trick never actually
+        // delivered the helper's output to us (zero jit_matrix messages ever
+        // arrived, and every video packet was identical - just our black seed
+        // frame, unchanged). Rather than debug an undocumented internal message
+        // further, poll the helper's own registered readback matrix directly -
+        // jit.gl.asyncread's "out_name" attribute (documented) gives us its name,
+        // and we read it with the exact same jit_object_findregistered/lock/
+        // getinfo/getdata sequence handle_jit_matrix already uses successfully.
+        c74::max::t_symbol* out_name_sym = c74::max::object_attr_getsym(m_gl_asyncread_box, c74::max::gensym("out_name"));
+        m_gl_asyncread_out_name = out_name_sym ? symbol(out_name_sym) : symbol("");
+
         post_status(std::string("status internal jit.gl.asyncread created, spec=[") + spec
-                    + "], hiddenconnect result=" + std::to_string((intptr_t)connect_result));
+                    + "], out_name=" + std::string(m_gl_asyncread_out_name));
+
+        if (m_gl_asyncread_out_name == symbol("")) {
+            post_status("error internal jit.gl.asyncread has no out_name - matrixoutput may not have taken effect");
+            return false;
+        }
+
+        if (m_gl_poll_timer_ptr)
+            m_gl_poll_timer_ptr->delay(1000.0 / std::max(1.0, (double)fps));
 
         return true;
+    }
+
+    int m_gl_poll_frames_logged = 0;
+
+    // Called periodically by m_gl_poll_timer_ptr (main/scheduler thread) while
+    // the helper is alive. Reads its internally-registered readback matrix
+    // directly - see the comment in ensure_gl_asyncread_helper() for why.
+    void poll_gl_asyncread_frame() {
+        if (!m_gl_asyncread_box || m_gl_asyncread_out_name == symbol(""))
+            return;
+
+        void* matrix = c74::max::jit_object_findregistered(m_gl_asyncread_out_name);
+        if (!matrix || !c74::max::jit_object_method(matrix, c74::max::_jit_sym_class_jit_matrix))
+            return;
+
+        long savelock = (long)c74::max::jit_object_method(matrix, c74::max::_jit_sym_lock, 1);
+
+        c74::max::t_jit_matrix_info info;
+        char* bp = nullptr;
+        c74::max::jit_object_method(matrix, c74::max::_jit_sym_getinfo, &info);
+        c74::max::jit_object_method(matrix, c74::max::_jit_sym_getdata, &bp);
+
+        if (bp && info.dim[0] > 0 && (info.dimcount < 2 || info.dim[1] > 0)) {
+            if (m_gl_poll_frames_logged < 3) {
+                m_gl_poll_frames_logged++;
+                post_status(std::string("status gl poll frame: type=") + std::string(symbol(info.type))
+                            + " planecount=" + std::to_string(info.planecount) + " dim=" + std::to_string(info.dim[0])
+                            + "x" + std::to_string(info.dimcount > 1 ? info.dim[1] : 1));
+            }
+            if (bp && info.type == c74::max::_jit_sym_char && (info.planecount == 4 || info.planecount == 3))
+                convert_and_store_frame(info, (unsigned char*)bp);
+        }
+
+        c74::max::jit_object_method(matrix, c74::max::_jit_sym_lock, (void*)savelock);
     }
 
     void teardown_gl_asyncread_helper() {
@@ -498,6 +554,7 @@ private:
             m_gl_asyncread_box = nullptr;
         }
         m_gl_asyncread_texture = symbol("");
+        m_gl_asyncread_out_name = symbol(""); // m_gl_poll_timer_ptr's lambda checks m_gl_asyncread_box before rescheduling, so it stops on its own
     }
 
     // -----------------------------------------------------------------

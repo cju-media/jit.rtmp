@@ -25,9 +25,15 @@ both playing back correctly. Getting here surfaced three real, distinct bugs
    to keep the whole stream from ever playing, not just leave it silent.
    `start` now refuses to run (with a real console error) if DSP is off -
    see the `start` message below.
+4. The internal `jit.gl.asyncread` helper for the `@gl_context` GL path
+   never actually delivered any output via the `"hiddenconnect"` wiring it
+   originally relied on - fixed by polling its `out_name` matrix directly
+   instead. See "GL texture input" below.
 
-The `@gl_context`/`jit_gl_texture` GL-texture path is implemented the same
-way as the matrix path but hasn't been live-tested yet.
+The `out_name`-polling fix for `@gl_context` has not yet been re-verified
+live - that's the next thing to confirm. The `jit_gl_texture` patch-cable
+path (multi-pass/offscreen textures) shares the same polling fix but hasn't
+been live-tested at all yet.
 
 ## How it works
 
@@ -49,9 +55,13 @@ way as the matrix path but hasn't been live-tested yet.
 - **GL texture input**: rather than reading OpenGL textures ourselves (would
   mean reverse-engineering undocumented Jitter GL internals and juggling GL
   context/thread affinity), the object instantiates a hidden internal
-  `jit.gl.asyncread` — the same object/behavior you'd patch in by hand — and
-  wires its matrix output straight into the `jit_matrix` handler above via a
-  hidden patch cord. Two ways to feed it:
+  `jit.gl.asyncread` — the same object/behavior you'd patch in by hand. An
+  earlier version tried to wire its outlet to our inlet with the internal
+  `"hiddenconnect"` patcher message; confirmed live that this never actually
+  delivered anything (zero messages ever arrived). Instead we poll its
+  documented `out_name` attribute — the name of its own internally-registered
+  readback matrix — on a timer, and read that matrix directly with the exact
+  same code path used for `jit_matrix` messages. Two ways to feed it:
   - `@gl_context <name>` attribute — names a `jit.gl` context (e.g. a
     `jit.world`'s `@name`) to grab whole-framebuffer frames from continuously,
     every render pass. No patch cord needed for video at all; just set this
@@ -128,16 +138,14 @@ for attributes that very much do exist in the source you just built.
 - **Stereo only**: audio is hardcoded to 2 channels in, matching typical
   stream targets. Extending to N channels is straightforward if needed later.
 - **Video format**: only char ARGB/RGB `jit_matrix` input is handled today.
-- **GL path is the least verified part of this object.** It's built on real,
-  confirmed SDK primitives (`newobject_sprintf`, `jbox_set_hidden`,
-  `object_attr_setsym`, and the `"connect"`/`"hiddenconnect"` patcher messages
-  - the latter is a real symbol in the SDK's `jpatcher_syms.c` but isn't in
-  the public header docs, so the exact calling convention is inferred from
-  precedent rather than a documented prototype) and `jit.gl.asyncread`'s own
-  documented attributes (`@texture`, `@matrixoutput`, `@drawto`,
-  `@automatic`), but none of it has been exercised against an actual
-  rendering `jit.world`/`jit.gl.*` chain yet. If the hidden-connect call
-  doesn't behave as expected, you'll see `error could not wire internal
-  jit.gl.asyncread to this object` on the status outlet — report that back
-  and it'll need a fix.
-- **Not yet tested live** — see Status above.
+- **GL path**: the original design relied on an internal `"hiddenconnect"`
+  patcher message to wire the helper's outlet to our inlet - confirmed live
+  against a `jit.world` via `@gl_context` that this never worked (zero
+  messages ever arrived, every video packet was just our unchanging black
+  seed frame). Replaced with polling the helper's own `out_name` matrix
+  directly on a timer instead - **that fix has not been re-verified live
+  yet**, for either `@gl_context` or the patch-cable `jit_gl_texture` path.
+  If the poll ever comes up empty, you'll see `error internal
+  jit.gl.asyncread has no out_name - matrixoutput may not have taken effect`
+  on the status outlet.
+- Audio and matrix-driven video are confirmed working end to end on YouTube.

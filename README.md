@@ -97,4 +97,4 @@ The outlet reports status and errors as messages: `status connecting`, `status l
 
 ## License
 
-No license file is included yet — add one appropriate for your use case. Note that Homebrew's default FFmpeg build enables `libx264`, which requires `--enable-gpl`; if you distribute *compiled binaries* of this external linked against a GPL-enabled FFmpeg build, that carries GPL obligations regardless of how you license this repository's own source.
+[MIT](LICENSE). Note that Homebrew's default FFmpeg build enables `libx264`, which requires `--enable-gpl`; if you distribute *compiled binaries* of this external linked against a GPL-enabled FFmpeg build, that carries GPL obligations independent of this repository's own (MIT) license.

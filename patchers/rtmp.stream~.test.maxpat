@@ -178,7 +178,7 @@
                     "numinlets": 2,
                     "numoutlets": 1,
                     "outlettype": [ "" ],
-                    "patching_rect": [ 30.0, 300.0, 80.0, 22.0 ],
+                    "patching_rect": [ 34.0, 300.0, 80.0, 22.0 ],
                     "text": "rtmp.stream~"
                 }
             },
@@ -313,7 +313,7 @@
                     "maxclass": "comment",
                     "numinlets": 1,
                     "numoutlets": 0,
-                    "patching_rect": [ 30.0, 400.0, 716.0, 47.0 ],
+                    "patching_rect": [ 30.0, 400.0, 719.0, 47.0 ],
                     "text": "Notes: left inlet is messages only (jit_matrix / jit_gl_texture / start / stop / url / attrs). Right inlet is a single MC audio inlet - any channel count, downmixed to stereo for the stream. The object accepts char ARGB or RGB jit_matrix data (jit.grab's default output is fine as-is). The status outlet reports \"status connecting\", \"status live\", \"status stopped\", and \"error ...\" messages - watch the Max console."
                 }
             }
@@ -351,12 +351,6 @@
             },
             {
                 "patchline": {
-                    "destination": [ "obj_rtmp", 0 ],
-                    "source": [ "obj-1", 0 ]
-                }
-            },
-            {
-                "patchline": {
                     "destination": [ "obj_grab", 0 ],
                     "source": [ "obj-2", 0 ]
                 }
@@ -389,6 +383,12 @@
                 "patchline": {
                     "destination": [ "obj_mcpack", 0 ],
                     "source": [ "obj_adc", 0 ]
+                }
+            },
+            {
+                "patchline": {
+                    "destination": [ "obj_rtmp", 0 ],
+                    "source": [ "obj_grab", 0 ]
                 }
             },
             {

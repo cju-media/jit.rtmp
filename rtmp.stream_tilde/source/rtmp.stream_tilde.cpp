@@ -304,9 +304,18 @@ private:
     // Video: receive + convert a jit_matrix. Runs on whatever thread
     // delivered the message (main / Jitter scheduler) - not the audio thread.
     // -----------------------------------------------------------------
+    int m_jit_matrix_calls_logged = 0;
+
     void handle_jit_matrix(const atoms& args) {
         if (args.empty())
             return;
+
+        if (m_jit_matrix_calls_logged < 5) {
+            m_jit_matrix_calls_logged++;
+            post_status(std::string("status jit_matrix received: ") + (args[0].type() == message_type::symbol_argument
+                                                                        ? std::string(symbol(args[0]))
+                                                                        : std::string("<non-symbol arg>")));
+        }
 
         symbol mname  = args[0];
         void*  matrix = c74::max::jit_object_findregistered(mname);
@@ -328,6 +337,24 @@ private:
         }
 
         c74::max::jit_object_method(matrix, c74::max::_jit_sym_lock, (void*)savelock);
+    }
+
+    // Allocates a solid-black YUV420P frame at the configured output resolution.
+    // Caller must hold m_video_mutex. Returns nullptr on allocation failure.
+    AVFrame* create_black_frame() {
+        AVFrame* frame = av_frame_alloc();
+        frame->format = AV_PIX_FMT_YUV420P;
+        frame->width  = out_width;
+        frame->height = out_height;
+        if (av_frame_get_buffer(frame, 32) < 0) {
+            av_frame_free(&frame);
+            return nullptr;
+        }
+        // Limited-range black: Y=16, U=V=128.
+        std::memset(frame->data[0], 16, (size_t)frame->linesize[0] * frame->height);
+        std::memset(frame->data[1], 128, (size_t)frame->linesize[1] * (frame->height / 2));
+        std::memset(frame->data[2], 128, (size_t)frame->linesize[2] * (frame->height / 2));
+        return frame;
     }
 
     void convert_and_store_frame(const c74::max::t_jit_matrix_info& info, unsigned char* data) {
@@ -393,7 +420,14 @@ private:
     // internals. Its output ("jit_matrix <name>") lands right back in our
     // own jit_matrix handler above via a hidden patch cord we create once.
     // -----------------------------------------------------------------
+    int m_gl_texture_calls_logged = 0;
+
     void handle_gl_texture(const atoms& args) {
+        if (m_gl_texture_calls_logged < 3) {
+            m_gl_texture_calls_logged++;
+            post_status(std::string("status jit_gl_texture message received (streaming=")
+                        + (m_streaming.load() ? "1" : "0") + ", args_empty=" + (args.empty() ? "1" : "0") + ")");
+        }
         if (!m_streaming.load(std::memory_order_relaxed) || args.empty())
             return;
 
@@ -443,15 +477,17 @@ private:
         }
         c74::max::jbox_set_hidden(m_gl_asyncread_box, 1);
 
-        c74::max::t_atom_long err = (c74::max::t_atom_long)(intptr_t)c74::max::object_method(
+        // NOTE: "hiddenconnect"'s success/failure return convention isn't in any
+        // public header we have (only the gensym'd symbol itself is - it's genuinely
+        // internal). Don't guess and tear the helper down on a merely-nonzero
+        // result, since that could just as easily be a valid non-null pointer to
+        // the created patchline on *success* - log it and let whether jit_matrix
+        // messages actually start arriving be the real signal (see handle_jit_matrix).
+        void* connect_result = c74::max::object_method(
             patcher_obj, c74::max::gensym("hiddenconnect"), m_gl_asyncread_box, 0L, maxobj(), 0L
         );
-        if (err != 0) {
-            post_status("error could not wire internal jit.gl.asyncread to this object");
-            c74::max::object_free(m_gl_asyncread_box);
-            m_gl_asyncread_box = nullptr;
-            return false;
-        }
+        post_status(std::string("status internal jit.gl.asyncread created, spec=[") + spec
+                    + "], hiddenconnect result=" + std::to_string((intptr_t)connect_result));
 
         return true;
     }
@@ -492,6 +528,19 @@ private:
         m_stop_requested.store(false);
         m_audio_ring.reset();
         m_streaming.store(true); // set before ensure_gl_asyncread_helper() since handle_gl_texture() checks it
+
+        // Seed a black frame immediately so the video stream always has *something*
+        // to encode from the very first tick, regardless of whether/when a real video
+        // source shows up. Otherwise, with no source connected yet (or patch cables
+        // being moved around live), the video stream gets zero packets, which risks
+        // stalling FFmpeg's interleaved writer for BOTH streams, not just leaving
+        // video blank - the same class of problem the DSP-off bug turned out to be.
+        // Any real frame that arrives afterward replaces this the normal way.
+        {
+            std::lock_guard<std::mutex> lock(m_video_mutex);
+            if (!m_latest_video_frame)
+                m_latest_video_frame = create_black_frame();
+        }
 
         std::string ctx = gl_context.get().c_str();
         if (!ctx.empty())

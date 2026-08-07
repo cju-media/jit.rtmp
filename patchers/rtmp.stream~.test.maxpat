@@ -47,7 +47,7 @@
                     "outlettype": [ "jit_gl_texture", "", "dictionary" ],
                     "output_texture": 1,
                     "parameter_enable": 0,
-                    "patching_rect": [ 563.0, 225.0, 150.0, 30.0 ],
+                    "patching_rect": [ 315.0, 315.0, 150.0, 30.0 ],
                     "saved_attribute_attributes": {
                         "candicane2": {
                             "expression": ""
@@ -178,8 +178,8 @@
                     "numinlets": 2,
                     "numoutlets": 1,
                     "outlettype": [ "" ],
-                    "patching_rect": [ 30.0, 300.0, 220.0, 22.0 ],
-                    "text": "rtmp.stream~"
+                    "patching_rect": [ 30.0, 300.0, 197.0, 22.0 ],
+                    "text": "rtmp.stream~ @gl_context display1"
                 }
             },
             {
@@ -374,18 +374,6 @@
                 "patchline": {
                     "destination": [ "obj_qmetro", 0 ],
                     "source": [ "obj_toggle", 0 ]
-                }
-            },
-            {
-                "patchline": {
-                    "destination": [ "obj_ezdac", 0 ],
-                    "source": [ "obj_adc", 0 ]
-                }
-            },
-            {
-                "patchline": {
-                    "destination": [ "obj_ezdac", 1 ],
-                    "source": [ "obj_adc", 1 ]
                 }
             }
         ],

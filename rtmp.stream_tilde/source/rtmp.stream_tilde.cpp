@@ -190,6 +190,15 @@ public:
         description { "Keyframe (GOP) interval in frames. 0 = derive from fps * 2." }
     };
 
+    attribute<symbol> gl_context { this, "gl_context", "",
+        description {
+            "Name of a jit.gl context (e.g. a jit.world's @name) to stream directly, "
+            "grabbing its whole composited output every render pass via an internal "
+            "jit.gl.asyncread. No patch cord needed for this - set this and 'start'. "
+            "Leave empty to feed video via jit_matrix / jit_gl_texture messages instead."
+        }
+    };
+
     // -----------------------------------------------------------------
     // Messages
     // -----------------------------------------------------------------
@@ -210,6 +219,19 @@ public:
     message<> jit_matrix { this, "jit_matrix", "Receive a video frame from Jitter.",
         MIN_FUNCTION {
             handle_jit_matrix(args);
+            return {};
+        }
+    };
+
+    // A jit.gl.* object connected directly to the inlet sends this instead of
+    // jit_matrix. We don't read GL textures ourselves - we lazily instantiate a
+    // hidden internal jit.gl.asyncread (the same object you'd patch in by hand)
+    // and point it at the named texture; it does the real (async, non-stalling)
+    // GPU->CPU readback and hands us back an ordinary jit_matrix, which is fed
+    // straight into the existing handle_jit_matrix() pipeline below.
+    message<> jit_gl_texture { this, "jit_gl_texture", "Receive a video frame from a jit.gl texture.",
+        MIN_FUNCTION {
+            handle_gl_texture(args);
             return {};
         }
     };
@@ -238,6 +260,10 @@ private:
     SwsContext* m_sws_ctx            = nullptr;
     long        m_sws_src_w = 0, m_sws_src_h = 0;
     AVPixelFormat m_sws_src_fmt = AV_PIX_FMT_NONE;
+
+    // === Internal jit.gl.asyncread helper (GL texture readback), main/Jitter thread only ===
+    c74::max::t_object* m_gl_asyncread_box = nullptr;
+    symbol          m_gl_asyncread_texture { "" };
 
     // === Audio ring buffer (lock-free) ===
     audio_ring m_audio_ring;
@@ -354,6 +380,86 @@ private:
     }
 
     // -----------------------------------------------------------------
+    // GL texture input: delegate the actual GPU->CPU readback to a hidden,
+    // internally-instantiated jit.gl.asyncread rather than touching OpenGL
+    // ourselves. This reuses Cycling'74's own (closed-source) implementation,
+    // so we inherit correct GL-context/thread handling and PBO double-
+    // buffering for free instead of reimplementing it against undocumented
+    // internals. Its output ("jit_matrix <name>") lands right back in our
+    // own jit_matrix handler above via a hidden patch cord we create once.
+    // -----------------------------------------------------------------
+    void handle_gl_texture(const atoms& args) {
+        if (!m_streaming.load(std::memory_order_relaxed) || args.empty())
+            return;
+
+        symbol texname = args[0];
+
+        if (!ensure_gl_asyncread_helper())
+            return;
+
+        if (texname != m_gl_asyncread_texture) {
+            c74::max::object_attr_setsym(m_gl_asyncread_box, c74::max::gensym("texture"), texname);
+            m_gl_asyncread_texture = texname;
+        }
+        // @automatic 1 (set at creation) keeps it reading on every render pass;
+        // no explicit bang needed here.
+    }
+
+    // Lazily create (once per streaming session) a hidden jit.gl.asyncread
+    // instance in our own patcher, configured to output matrices, and wire
+    // its outlet 0 directly into our own inlet 0 with a hidden patchline -
+    // equivalent to the user patching `jit.gl.asyncread -> rtmp.stream~` by
+    // hand, just done for them. Returns false (and posts a status message)
+    // if any step fails, e.g. because we can't resolve our owning patcher.
+    //
+    // If drawto_context is non-empty, the helper targets that named jit.gl
+    // context directly (@drawto) and reads its whole composited framebuffer
+    // every render pass with no incoming texture message required - this is
+    // the "just stream my jit.world" path driven by the @gl_context attribute.
+    // Otherwise it's left targeting whatever @texture handle_gl_texture() sets.
+    bool ensure_gl_asyncread_helper(const std::string& drawto_context = "") {
+        if (m_gl_asyncread_box)
+            return true;
+
+        c74::max::t_object* patcher_obj = patcher();
+        if (!patcher_obj) {
+            post_status("error could not locate owning patcher for internal jit.gl.asyncread");
+            return false;
+        }
+
+        std::string spec = "@maxclass jit.gl.asyncread @matrixoutput 1 @automatic 1";
+        if (!drawto_context.empty())
+            spec += " @drawto " + drawto_context;
+
+        m_gl_asyncread_box = c74::max::newobject_sprintf(patcher_obj, "%s", spec.c_str());
+        if (!m_gl_asyncread_box) {
+            post_status("error could not instantiate internal jit.gl.asyncread - is Jitter installed?");
+            return false;
+        }
+        c74::max::jbox_set_hidden(m_gl_asyncread_box, 1);
+
+        c74::max::t_atom_long err = (c74::max::t_atom_long)(intptr_t)c74::max::object_method(
+            patcher_obj, c74::max::gensym("hiddenconnect"), m_gl_asyncread_box, 0L, maxobj(), 0L
+        );
+        if (err != 0) {
+            post_status("error could not wire internal jit.gl.asyncread to this object");
+            c74::max::object_free(m_gl_asyncread_box);
+            m_gl_asyncread_box = nullptr;
+            return false;
+        }
+
+        return true;
+    }
+
+    void teardown_gl_asyncread_helper() {
+        if (m_gl_asyncread_box) {
+            c74::max::object_free(m_gl_asyncread_box);
+            m_gl_asyncread_box = nullptr;
+        }
+        m_gl_asyncread_texture = symbol("");
+    }
+
+    // -----------------------------------------------------------------
     // Stream lifecycle
     // -----------------------------------------------------------------
     void start_streaming() {
@@ -369,11 +475,15 @@ private:
 
         m_stop_requested.store(false);
         m_audio_ring.reset();
+        m_streaming.store(true); // set before ensure_gl_asyncread_helper() since handle_gl_texture() checks it
+
+        std::string ctx = gl_context.get().c_str();
+        if (!ctx.empty())
+            ensure_gl_asyncread_helper(ctx);
 
         m_encoder_thread = std::thread([this, dest]() {
             encoder_thread_main(dest);
         });
-        m_streaming.store(true);
         post_status("status connecting");
     }
 
@@ -386,6 +496,10 @@ private:
 
         if (m_encoder_thread.joinable())
             m_encoder_thread.join();
+
+        // Main-thread only (touches the Max object/patcher API) - stop_streaming()
+        // is only ever called from a message handler or our destructor, both main thread.
+        teardown_gl_asyncread_helper();
 
         std::lock_guard<std::mutex> lock(m_video_mutex);
         if (m_latest_video_frame)

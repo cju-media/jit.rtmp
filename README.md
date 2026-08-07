@@ -32,6 +32,20 @@ first live test as the real verification step, not this build log.
   resolution, and swaps it into a "latest frame" slot under a small mutex.
   Only char ARGB (4-plane) or RGB (3-plane) matrices are supported — convert
   upstream with e.g. `jit.matrix 4 char WxH` if your source is float.
+- **GL texture input**: rather than reading OpenGL textures ourselves (would
+  mean reverse-engineering undocumented Jitter GL internals and juggling GL
+  context/thread affinity), the object instantiates a hidden internal
+  `jit.gl.asyncread` — the same object/behavior you'd patch in by hand — and
+  wires its matrix output straight into the `jit_matrix` handler above via a
+  hidden patch cord. Two ways to feed it:
+  - `@gl_context <name>` attribute — names a `jit.gl` context (e.g. a
+    `jit.world`'s `@name`) to grab whole-framebuffer frames from continuously,
+    every render pass. No patch cord needed for video at all; just set this
+    and `start`.
+  - `jit_gl_texture <name>` message — sent automatically by a `jit.gl.*`
+    object patched into the left inlet when it outputs to a named texture
+    (multi-pass/offscreen pipelines). The helper's `@texture` is retargeted
+    whenever the name changes.
 - **Encoder thread**: a single background `std::thread` owns the
   `AVFormatContext` exclusively (FFmpeg's muxer isn't safe to call from two
   threads at once). Each loop iteration drains available audio, and on a
@@ -56,6 +70,7 @@ first live test as the real verification step, not this build log.
 | `@samplerate` | 48000 | Audio encode sample rate (input is resampled to this) |
 | `@hwaccel` | 1 | Use VideoToolbox hardware H.264 encoding |
 | `@keyframe_interval` | 60 | GOP size in frames |
+| `@gl_context` | `""` | Name of a `jit.gl` context to stream directly (see GL texture input above) |
 
 ## Messages
 
@@ -63,6 +78,8 @@ first live test as the real verification step, not this build log.
 - `stop` — stop streaming and disconnect
 - `jit_matrix <name>` — normally sent automatically by whatever Jitter object
   you patch into the left inlet
+- `jit_gl_texture <name>` — normally sent automatically by a `jit.gl.*`
+  object patched into the left inlet; not needed if you're using `@gl_context`
 
 ## Building
 
@@ -89,4 +106,16 @@ whole app, to reload the external after a rebuild).
 - **Stereo only**: audio is hardcoded to 2 channels in, matching typical
   stream targets. Extending to N channels is straightforward if needed later.
 - **Video format**: only char ARGB/RGB `jit_matrix` input is handled today.
+- **GL path is the least verified part of this object.** It's built on real,
+  confirmed SDK primitives (`newobject_sprintf`, `jbox_set_hidden`,
+  `object_attr_setsym`, and the `"connect"`/`"hiddenconnect"` patcher messages
+  - the latter is a real symbol in the SDK's `jpatcher_syms.c` but isn't in
+  the public header docs, so the exact calling convention is inferred from
+  precedent rather than a documented prototype) and `jit.gl.asyncread`'s own
+  documented attributes (`@texture`, `@matrixoutput`, `@drawto`,
+  `@automatic`), but none of it has been exercised against an actual
+  rendering `jit.world`/`jit.gl.*` chain yet. If the hidden-connect call
+  doesn't behave as expected, you'll see `error could not wire internal
+  jit.gl.asyncread to this object` on the status outlet — report that back
+  and it'll need a fix.
 - **Not yet tested live** — see Status above.

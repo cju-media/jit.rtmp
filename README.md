@@ -130,6 +130,14 @@ live-tested on its own yet - only `@gl_context` has.
   you patch into the left inlet
 - `jit_gl_texture <name>` — normally sent automatically by a `jit.gl.*`
   object patched into the left inlet; not needed if you're using `@gl_context`
+- `gl_disconnect` — stop and tear down the internal `jit.gl.asyncread`
+  helper, if one exists. **Send this before switching your video source away
+  from GL/`@gl_context`** (e.g. to a `jit_matrix` source) — the helper has no
+  way to know a patch cord moved and will otherwise keep reading its GL
+  context indefinitely, fighting with the new source over the same output
+  frame (visible flashing between the two). Switching *back* to GL
+  afterward works normally — sending a new `jit_gl_texture` message (or
+  restarting the stream with `@gl_context` set) recreates it on demand.
 
 ## Building
 

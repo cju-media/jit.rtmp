@@ -251,6 +251,21 @@ public:
         }
     };
 
+    // The internal jit.gl.asyncread helper, once created, keeps reading its GL
+    // context/texture continuously for the rest of the streaming session,
+    // completely decoupled from whether a patch cord is still actually connected
+    // to us - there's no signal that tells us "the user moved on". If you're
+    // switching between a GL source and a jit_matrix source live, send this
+    // first (before/instead of relying on us to notice) to stop it, or you'll
+    // get both sources fighting over the same output frame (visible flashing).
+    message<> gl_disconnect { this, "gl_disconnect", "Stop and tear down the internal jit.gl.asyncread helper, if one exists.",
+        MIN_FUNCTION {
+            teardown_gl_asyncread_helper();
+            post_status("status internal jit.gl.asyncread disconnected");
+            return {};
+        }
+    };
+
     // -----------------------------------------------------------------
     // Audio: called on Max's audio thread. Must never block or allocate.
     //

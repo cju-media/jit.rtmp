@@ -558,6 +558,16 @@ private:
         if (!m_gl_asyncread_box || m_gl_asyncread_out_name == symbol(""))
             return;
 
+        // Drive the capture explicitly rather than relying solely on @automatic 1.
+        // Reported live: a texture connected from the start of a session stayed
+        // black indefinitely, but started working the moment an unrelated
+        // jit_matrix message came through first - consistent with @automatic's
+        // capture being tied to Jitter's own render/scheduler tick rather than
+        // firing reliably on its own from a cold start. "bang" is documented
+        // (jit.gl.asyncread's maxref) as triggering a read on demand, so send it
+        // ourselves every poll instead of depending on incidental scheduler activity.
+        c74::max::object_method(m_gl_asyncread_box, c74::max::gensym("bang"));
+
         void* matrix = c74::max::jit_object_findregistered(m_gl_asyncread_out_name);
         if (!matrix || !c74::max::jit_object_method(matrix, c74::max::_jit_sym_class_jit_matrix))
             return;

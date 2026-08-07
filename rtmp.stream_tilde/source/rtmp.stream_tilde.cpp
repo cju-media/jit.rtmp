@@ -372,6 +372,18 @@ private:
         if (args.empty())
             return;
 
+        // A real jit_matrix message (this is only ever called for those - our
+        // own internal GL polling calls convert_and_store_frame() directly,
+        // bypassing this) means the user has switched to a matrix source.
+        // Auto-disconnect the GL helper so it stops fighting over the shared
+        // output frame - the two sources are mutually exclusive by design.
+        // Switching back to GL still works normally afterward (a new
+        // jit_gl_texture message or @gl_context recreates it on demand).
+        if (m_gl_asyncread_box) {
+            teardown_gl_asyncread_helper();
+            post_status("status jit_matrix arrived - auto-disconnected internal jit.gl.asyncread");
+        }
+
         if (m_jit_matrix_calls_logged < 5) {
             m_jit_matrix_calls_logged++;
             post_status(std::string("status jit_matrix received: ") + (args[0].type() == message_type::symbol_argument

@@ -127,17 +127,18 @@ live-tested on its own yet - only `@gl_context` has.
   visible even with nothing patched to the status outlet)
 - `stop` — stop streaming and disconnect
 - `jit_matrix <name>` — normally sent automatically by whatever Jitter object
-  you patch into the left inlet
+  you patch into the left inlet. If an internal `jit.gl.asyncread` helper is
+  currently active (from `jit_gl_texture`/`@gl_context`), a real `jit_matrix`
+  message auto-disconnects it first — GL and matrix input are mutually
+  exclusive, whichever arrives most recently wins. Switching back to GL
+  afterward works normally (a new `jit_gl_texture` message, or restarting
+  the stream with `@gl_context` set, recreates the helper on demand).
 - `jit_gl_texture <name>` — normally sent automatically by a `jit.gl.*`
   object patched into the left inlet; not needed if you're using `@gl_context`
-- `gl_disconnect` — stop and tear down the internal `jit.gl.asyncread`
-  helper, if one exists. **Send this before switching your video source away
-  from GL/`@gl_context`** (e.g. to a `jit_matrix` source) — the helper has no
-  way to know a patch cord moved and will otherwise keep reading its GL
-  context indefinitely, fighting with the new source over the same output
-  frame (visible flashing between the two). Switching *back* to GL
-  afterward works normally — sending a new `jit_gl_texture` message (or
-  restarting the stream with `@gl_context` set) recreates it on demand.
+- `gl_disconnect` — manually stop and tear down the internal
+  `jit.gl.asyncread` helper, if one exists. Not usually needed — switching
+  to a `jit_matrix` source does this automatically (see above) — but
+  available if you want to stop GL reading without switching to a matrix.
 
 ## Building
 

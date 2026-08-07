@@ -9,9 +9,15 @@ Built with [Min-API](https://github.com/Cycling74/min-api) (C++) and
 
 ## Status
 
-**Confirmed working end-to-end on YouTube**: `jit.grab` video + `adc~` audio,
-both playing back correctly. Getting here surfaced three real, distinct bugs
-(see git log for full detail on each):
+**Confirmed working end-to-end on YouTube**, all input paths, all starting
+conditions:
+
+- `jit_matrix` video (e.g. `jit.grab`) + MC audio
+- `@gl_context` GL texture video, including starting a session directly from
+  a texture with no prior matrix (the case that used to fail) + MC audio
+
+Getting here surfaced several real, distinct bugs (see git log for full
+detail on each):
 
 1. VideoToolbox doesn't populate H.264 extradata (SPS/PPS) until after it's
    encoded a frame, so the FLV header written at stream start had none -
@@ -28,24 +34,20 @@ both playing back correctly. Getting here surfaced three real, distinct bugs
 4. The internal `jit.gl.asyncread` helper for the `@gl_context` GL path
    never actually delivered any output via the `"hiddenconnect"` wiring it
    originally relied on - fixed by polling its `out_name` matrix directly
-   instead. See "GL texture input" below.
+   instead.
+5. That polling fix only actually produced video after a `jit_matrix`
+   message had come through first — starting a session directly from a
+   texture stayed black under `jit.gl.asyncread`'s own `@automatic 1`
+   triggering. Driving it ourselves with an explicit `bang` fixed the
+   "when" problem, but doing that *alongside* `@automatic 1` (two
+   independent trigger sources hitting the same async PBO double-buffer)
+   regressed things further — the stream stopped going live on YouTube's
+   end at all. Fixed by using `bang` as the sole trigger source
+   (`@automatic 0`). See "GL texture input" below.
 
-**MC audio input is confirmed working live** - the object inherits
-`mc_operator<>` instead of `vector_operator<>`, and the right inlet accepts
-any channel count, downmixed to stereo (see "How it works" below).
-
-**The GL path (`@gl_context`) is still broken, currently worse than before.**
-Timeline: the `out_name`-polling fix got video flowing, but only after a
-`jit_matrix` message had come through first - starting a session directly
-from a texture stayed black. An attempted fix (explicitly `bang`-ing
-`jit.gl.asyncread` every poll tick, alongside its own `@automatic 1`)
-regressed this from "black video" to **the stream failing to go live on
-YouTube's end at all** (stuck on "preparing stream", despite a solid RTMP
-connection) - almost certainly two independent trigger sources racing the
-same async PBO double-buffer. Reverted to a single trigger source: explicit
-`bang` only, `@automatic 0`. **Not yet re-verified live** - starting a
-session directly from a texture (the original failing case) is the next
-thing to test.
+`jit_gl_texture` (the patch-cable, multi-pass/offscreen-texture variant of
+the GL path) shares all the same fixes but hasn't specifically been
+live-tested on its own yet - only `@gl_context` has.
 
 ## How it works
 
@@ -156,17 +158,21 @@ for attributes that very much do exist in the source you just built.
   anyone else opening this patch needs `brew install ffmpeg` too, or the
   dylibs need to be bundled into the `.mxo` and re-pathed with
   `install_name_tool`/`dylibbundler` before sharing.
-- **Stereo only**: audio is hardcoded to 2 channels in, matching typical
-  stream targets. Extending to N channels is straightforward if needed later.
-- **Video format**: only char ARGB/RGB `jit_matrix` input is handled today.
-- **GL path**: the original design relied on an internal `"hiddenconnect"`
-  patcher message to wire the helper's outlet to our inlet - confirmed live
-  against a `jit.world` via `@gl_context` that this never worked (zero
-  messages ever arrived, every video packet was just our unchanging black
-  seed frame). Replaced with polling the helper's own `out_name` matrix
-  directly on a timer instead - **that fix has not been re-verified live
-  yet**, for either `@gl_context` or the patch-cable `jit_gl_texture` path.
+- **Stereo output only**: input audio accepts any channel count (MC), but
+  it's always downmixed to stereo before encoding, matching typical stream
+  targets. See "Audio path" above for the downmix rule.
+- **Video format**: only char ARGB/RGB `jit_matrix` input is handled today
+  (this includes what the internal `jit.gl.asyncread` produces for the GL
+  path — it outputs a regular char matrix too).
+- **GL path history**: two real bugs found and fixed via live testing - the
+  original `"hiddenconnect"`-based delivery never worked at all (see git
+  log), and the follow-up fix only produced video after a `jit_matrix`
+  message had come through first, which an explicit-`bang`-plus-`@automatic`
+  fix attempt briefly regressed into the stream failing to go live at all.
+  Both are resolved now (single trigger source: `bang`, `@automatic 0`) and
+  confirmed working, including starting a session directly from a texture.
   If the poll ever comes up empty, you'll see `error internal
   jit.gl.asyncread has no out_name - matrixoutput may not have taken effect`
   on the status outlet.
-- Audio and matrix-driven video are confirmed working end to end on YouTube.
+- Audio (stereo or MC, downmixed), matrix-driven video, and `@gl_context`
+  GL video are all confirmed working end to end on YouTube.

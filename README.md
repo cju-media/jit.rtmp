@@ -1,187 +1,100 @@
 # rtmp.stream~
 
-A Max external that encodes live MSP audio + Jitter video and pushes it to an
-RTMP server (YouTube, Twitch, a self-hosted `nginx-rtmp`/MediaMTX server, etc.)
-directly from a Max patch, as an H.264/AAC/FLV stream.
+A [Max](https://cycling74.com/products/max) external that streams live MSP audio and Jitter video straight out of a patch to an RTMP server — YouTube, Twitch, a self-hosted [nginx-rtmp](https://github.com/arut/nginx-rtmp-module)/[MediaMTX](https://github.com/bluenviron/mediamtx) server, or anything else that speaks RTMP — as a standard H.264/AAC/FLV stream. No intermediate screen-capture app, no virtual audio cable — Max talks to the encoder directly.
 
-Built with [Min-API](https://github.com/Cycling74/min-api) (C++) and
-[FFmpeg](https://ffmpeg.org)'s `libavformat`/`libavcodec`/`libswscale`/`libswresample`.
+Built with [Min-API](https://github.com/Cycling74/min-api) (C++) and [FFmpeg](https://ffmpeg.org)'s `libavformat` / `libavcodec` / `libswscale` / `libswresample`.
 
-## Status
+## Features
 
-**Confirmed working end-to-end on YouTube**, all input paths, all starting
-conditions:
+- **Audio**: an MC (multichannel) inlet accepts any number of channels through one cable and downmixes to stereo AAC — route however many stems/mics/buses you want without managing individual mono cords.
+- **Video**: two independent input paths, usable interchangeably in the same session —
+  - **`jit_matrix`** — connect any classic Jitter object (`jit.grab`, `jit.movie`, `jit.matrix`, etc.) directly to the inlet.
+  - **GL textures/contexts** — stream a `jit.gl.*` / `jit.world` render chain, either by naming a context with `@gl_context` (grabs the whole composited framebuffer automatically, no cable needed) or by patching a texture-outputting object in directly. Handled by an internally-managed `jit.gl.asyncread`, so you get correct async GPU→CPU readback without touching OpenGL yourself.
+  - Switching from GL to a matrix source mid-stream is handled automatically; switching back just works.
+- **Hardware or software H.264 encoding** — VideoToolbox (`@hwaccel 1`) or libx264, your choice.
+- Everything (encoding, muxing, network I/O) runs on a dedicated background thread, so nothing here ever blocks Max's audio or scheduler threads.
 
-- `jit_matrix` video (e.g. `jit.grab`) + MC audio
-- `@gl_context` GL texture video, including starting a session directly from
-  a texture with no prior matrix (the case that used to fail) + MC audio
+## Requirements
 
-Getting here surfaced several real, distinct bugs (see git log for full
-detail on each):
+- macOS (Apple Silicon or Intel), Xcode Command Line Tools, [CMake](https://cmake.org)
+- Max 8+ with the [Max SDK](https://github.com/Cycling74/max-sdk) conventions (this repo vendors its own copy of [min-api](https://github.com/Cycling74/min-api), no separate install needed)
+- [FFmpeg](https://ffmpeg.org), e.g. via Homebrew:
+  ```bash
+  brew install ffmpeg
+  ```
 
-1. VideoToolbox doesn't populate H.264 extradata (SPS/PPS) until after it's
-   encoded a frame, so the FLV header written at stream start had none -
-   fixed by priming the encoder before `avformat_write_header`.
-2. The forced-keyframe mechanism used the wrong field
-   (`AV_FRAME_FLAG_KEY` isn't respected by libx264 as a force-keyframe
-   request) - every transmitted packet was a non-keyframe, so nothing was
-   ever decodable. Fixed via `pict_type = AV_PICTURE_TYPE_I`.
-3. **DSP simply wasn't running** in testing - `operator()` never fires with
-   audio off, so audio was silently never encoded, and that alone was enough
-   to keep the whole stream from ever playing, not just leave it silent.
-   `start` now refuses to run (with a real console error) if DSP is off -
-   see the `start` message below.
-4. The internal `jit.gl.asyncread` helper for the `@gl_context` GL path
-   never actually delivered any output via the `"hiddenconnect"` wiring it
-   originally relied on - fixed by polling its `out_name` matrix directly
-   instead.
-5. That polling fix only actually produced video after a `jit_matrix`
-   message had come through first — starting a session directly from a
-   texture stayed black under `jit.gl.asyncread`'s own `@automatic 1`
-   triggering. Driving it ourselves with an explicit `bang` fixed the
-   "when" problem, but doing that *alongside* `@automatic 1` (two
-   independent trigger sources hitting the same async PBO double-buffer)
-   regressed things further — the stream stopped going live on YouTube's
-   end at all. Fixed by using `bang` as the sole trigger source
-   (`@automatic 0`). See "GL texture input" below.
+## Building
 
-`jit_gl_texture` (the patch-cable, multi-pass/offscreen-texture variant of
-the GL path) shares all the same fixes but hasn't specifically been
-live-tested on its own yet - only `@gl_context` has.
+```bash
+git clone <this-repo-url>
+cd RTMP-Max-Output
+cmake -S . -B build
+cmake --build build
+```
 
-## How it works
+(`min-api`, including its bundled Max SDK, is vendored directly in this repo — no submodule init needed.)
 
-- **Inlets**: left inlet is messages only (`jit_matrix`, `jit_gl_texture`,
-  `start`, `stop`, `url ...`, attributes, etc. — no audio). Right inlet is a
-  single MC (multichannel) audio inlet, accepting any number of channels
-  through one cable.
-- **Outlet**: status/error messages (`status connecting`, `status live`,
-  `status stopped`, `error ...`).
-- **Audio path**: the object inherits Min-API's `mc_operator<>`, which makes
-  the audio inlet MC-capable — `audio_bundle::channel_count()` reflects
-  however many channels are actually connected, dynamically. Since RTMP/FLV
-  audio is essentially always expected to be stereo AAC by real-world
-  consumers (YouTube, Twitch, etc.), `operator()` downmixes on the audio
-  thread before anything else happens: 1 channel duplicates to L/R; 2+
-  channels alternate (even index → L, odd index → R), each side averaged
-  over however many landed on it to avoid gain buildup. The resulting stereo
-  pair is copied into a lock-free SPSC ring buffer (no locks/allocation on
-  the realtime thread). The encoder thread drains it, resamples to the
-  target rate with `libswresample`, and encodes fixed-size AAC frames via an
-  `AVAudioFifo`.
-- **Video path**: the `jit_matrix` message handler (fires on whatever thread
-  Jitter delivers on — not the audio thread) locks the matrix, reads it with
-  `libswscale` straight into a YUV420P frame at the configured output
-  resolution, and swaps it into a "latest frame" slot under a small mutex.
-  Only char ARGB (4-plane) or RGB (3-plane) matrices are supported — convert
-  upstream with e.g. `jit.matrix 4 char WxH` if your source is float.
-- **GL texture input**: rather than reading OpenGL textures ourselves (would
-  mean reverse-engineering undocumented Jitter GL internals and juggling GL
-  context/thread affinity), the object instantiates a hidden internal
-  `jit.gl.asyncread` — the same object/behavior you'd patch in by hand. An
-  earlier version tried to wire its outlet to our inlet with the internal
-  `"hiddenconnect"` patcher message; confirmed live that this never actually
-  delivered anything (zero messages ever arrived). Instead we poll its
-  documented `out_name` attribute — the name of its own internally-registered
-  readback matrix — on a timer, and read that matrix directly with the exact
-  same code path used for `jit_matrix` messages. Two ways to feed it:
-  - `@gl_context <name>` attribute — names a `jit.gl` context (e.g. a
-    `jit.world`'s `@name`) to grab whole-framebuffer frames from continuously,
-    every render pass. No patch cord needed for video at all; just set this
-    and `start`.
-  - `jit_gl_texture <name>` message — sent automatically by a `jit.gl.*`
-    object patched into the left inlet when it outputs to a named texture
-    (multi-pass/offscreen pipelines). The helper's `@texture` is retargeted
-    whenever the name changes.
-- **Encoder thread**: a single background `std::thread` owns the
-  `AVFormatContext` exclusively (FFmpeg's muxer isn't safe to call from two
-  threads at once). Each loop iteration drains available audio, and on a
-  steady per-frame timer pulls the latest video frame (re-emitting the last
-  frame if nothing new arrived, to keep the output at a constant frame rate
-  the way a real streaming encoder should). Never blocks Max's own threads —
-  network I/O and encoding happen entirely here, and an `AVIOInterruptCB` lets
-  `stop` abort a hung connection promptly.
-- Video defaults to `h264_videotoolbox` (hardware) when `@hwaccel 1` (the
-  default); falls back to `libx264` / whatever H.264 encoder FFmpeg finds.
-  Audio is always the built-in FFmpeg AAC encoder.
+The built external lands at `build/externals/rtmp.stream~.mxo`. Copy or symlink it (and `patchers/`, if you want the example patch) into a package folder under your Max `Packages` directory, e.g. `~/Documents/Max 9/Packages/RTMP-Max-Output/externals/`.
+
+> **Rebuilding?** Max only loads a given external's compiled code once per app launch — reopening a patch after a rebuild does *not* pick up new code. **Fully quit and relaunch Max** after every rebuild.
+
+An example patch demonstrating both video paths and MC audio is at [`patchers/rtmp.stream~.test.maxpat`](patchers/rtmp.stream~.test.maxpat).
+
+## Quick start
+
+```
+[adc~ 1 2] → [mc.pack~ 2] → (right inlet) [rtmp.stream~] → (left inlet, message) [print]
+[jit.grab] ──────────────────────────────→ (left inlet)
+```
+
+```
+url rtmp://a.rtmp.youtube.com/live2/YOUR-STREAM-KEY
+start
+```
+
+Turn Max's DSP on before sending `start` — the object checks and will refuse (with a console error) otherwise.
 
 ## Attributes
 
 | Attribute | Default | Description |
 |---|---|---|
-| `@url` | `""` | RTMP URL, e.g. `rtmp://a.rtmp.youtube.com/live2/KEY` |
+| `@url` | `""` | RTMP URL to publish to, e.g. `rtmp://a.rtmp.youtube.com/live2/KEY` |
 | `@width` / `@height` | 1280 / 720 | Output video resolution |
-| `@fps` | 30 | Output frame rate |
-| `@video_kbps` | 4000 | Video bitrate (kbit/s) |
-| `@audio_kbps` | 160 | Audio (AAC) bitrate (kbit/s) |
-| `@samplerate` | 48000 | Audio encode sample rate (input is resampled to this) |
-| `@hwaccel` | 1 | Use VideoToolbox hardware H.264 encoding |
-| `@keyframe_interval` | 60 | GOP size in frames |
-| `@gl_context` | `""` | Name of a `jit.gl` context to stream directly (see GL texture input above) |
+| `@fps` | 30 | Output video frame rate |
+| `@video_kbps` | 4000 | Video encoder target bitrate (kbit/s) |
+| `@audio_kbps` | 160 | Audio (AAC) encoder target bitrate (kbit/s) |
+| `@samplerate` | 48000 | Audio encode sample rate in Hz; input is resampled to this |
+| `@hwaccel` | 0 | Use VideoToolbox hardware H.264 encoding instead of libx264 |
+| `@keyframe_interval` | 60 | Keyframe (GOP) interval in frames |
+| `@gl_context` | `""` | Name of a `jit.gl` context (e.g. a `jit.world`'s `@name`) to stream directly — see How it works below |
 
 ## Messages
 
-- `start` — connect and begin streaming (requires `@url` to be set first,
-  and Max's DSP/audio engine to be running - `start` checks `sys_getdspstate()`
-  and refuses with a console error, `rtmp.stream~: DSP is off - ...`, if not;
-  visible even with nothing patched to the status outlet)
-- `stop` — stop streaming and disconnect
-- `jit_matrix <name>` — normally sent automatically by whatever Jitter object
-  you patch into the left inlet. If an internal `jit.gl.asyncread` helper is
-  currently active (from `jit_gl_texture`/`@gl_context`), a real `jit_matrix`
-  message auto-disconnects it first — GL and matrix input are mutually
-  exclusive, whichever arrives most recently wins. Switching back to GL
-  afterward works normally (a new `jit_gl_texture` message, or restarting
-  the stream with `@gl_context` set, recreates the helper on demand).
-- `jit_gl_texture <name>` — normally sent automatically by a `jit.gl.*`
-  object patched into the left inlet; not needed if you're using `@gl_context`
-- `gl_disconnect` — manually stop and tear down the internal
-  `jit.gl.asyncread` helper, if one exists. Not usually needed — switching
-  to a `jit_matrix` source does this automatically (see above) — but
-  available if you want to stop GL reading without switching to a matrix.
+| Message | Description |
+|---|---|
+| `start` | Connect and begin streaming. Requires `@url` to be set and Max's DSP to be running. |
+| `stop` | Stop streaming and disconnect. |
+| `jit_matrix <name>` | Video frame from a classic Jitter object — normally sent automatically by whatever's patched into the left inlet. Char ARGB (4-plane) or RGB (3-plane) matrices only; convert upstream (e.g. `jit.matrix 4 char WxH`) if your source is float. |
+| `jit_gl_texture <name>` | Video frame from a `jit.gl.*` texture — sent automatically by a texture-outputting object patched into the left inlet. Not needed if you're using `@gl_context`. |
+| `gl_disconnect` | Manually stop the internal GL readback helper. Not usually needed — switching to a `jit_matrix` source does this automatically — but available if you want to stop GL reading without switching to a matrix. |
 
-## Building
+The outlet reports status and errors as messages: `status connecting`, `status live`, `status stopped`, and `error <message>`.
 
-Requires: Xcode command line tools, CMake, and FFmpeg (`brew install ffmpeg`).
+## How it works
 
-```bash
-cd /Users/c/Documents/Programming/RTMP-Max-Output
-cmake -S . -B build
-cmake --build build
-```
+- **Audio**: the inlet is MC-capable (`c74::min::mc_operator<>`) — `audio_bundle::channel_count()` reflects however many channels are actually connected, dynamically. Since RTMP/FLV audio is essentially always expected to be stereo by real-world consumers, the object downmixes on the audio thread before anything else happens: 1 channel duplicates to L/R; 2+ channels alternate (even index → L, odd index → R), each side averaged over however many landed on it to avoid gain buildup. The stereo pair is copied into a lock-free single-producer/single-consumer ring buffer (no locks or allocation on the realtime thread).
+- **Matrix video**: the `jit_matrix` handler locks the matrix, converts it with `libswscale` straight into a YUV420P frame at the configured output resolution, and swaps it into a "latest frame" slot under a small mutex.
+- **GL video**: rather than reading OpenGL textures directly (undocumented Jitter GL internals, GL context/thread affinity to manage), the object instantiates a hidden internal `jit.gl.asyncread` — the same object/behavior you'd patch in by hand — and polls its internally-registered readback matrix (`out_name`) on a timer, feeding it through the exact same conversion path as `jit_matrix`. `jit.gl.asyncread` is driven with an explicit `bang` per poll rather than its own `@automatic`, since GL and matrix input need to be mutually exclusive without racing each other.
+- **Encoder thread**: a dedicated background thread owns the FFmpeg output context exclusively (its muxer isn't safe to call from multiple threads at once). Each loop iteration drains available audio and, on a steady per-frame timer, encodes the latest video frame — re-emitting the last one if nothing new arrived, to keep output at a constant frame rate the way a real streaming encoder should. All network I/O and encoding happens here; nothing blocks Max's own threads, and an interrupt callback lets `stop` abort a hung connection promptly.
+- H.264 is encoded via VideoToolbox (`@hwaccel 1`) or libx264; audio always via FFmpeg's built-in AAC encoder.
 
-The built external lands at `build/externals/rtmp.stream~.mxo` and is
-symlinked into `~/Documents/Max 9/Packages/RTMP-Max-Output/externals`.
+## Known limitations
 
-**Important**: Max only loads a given external's compiled code once per app
-launch. Reopening the patch (or even closing/reopening the object box) after
-a rebuild does *not* pick up the new code — it keeps running whatever was
-loaded first. **Fully quit and relaunch Max** after every rebuild, or you'll
-see stale-code symptoms like `"<attr>" is not a valid attribute argument`
-for attributes that very much do exist in the source you just built.
+- **Distribution**: the built `.mxo` links against your local FFmpeg install by absolute path. Fine on your own machine; sharing the patch with someone else requires them to install FFmpeg too, or the dylibs need to be bundled into the `.mxo` and re-pathed (e.g. with `dylibbundler`) first.
+- **Stereo output only**: input audio accepts any channel count via MC, but it's always downmixed to stereo before encoding.
+- **Video format**: only char ARGB/RGB `jit_matrix` data is handled (this includes what the internal GL helper produces — it outputs a regular char matrix too).
+- One `jit.gl.*` render source per stream at a time (see "How it works" above) — no compositing of multiple GL contexts.
 
-## Known limitations / follow-ups
+## License
 
-- **Distribution**: the built `.mxo` links against Homebrew's FFmpeg dylibs by
-  absolute path (`/opt/homebrew/opt/ffmpeg/...`). Fine for your own machine;
-  anyone else opening this patch needs `brew install ffmpeg` too, or the
-  dylibs need to be bundled into the `.mxo` and re-pathed with
-  `install_name_tool`/`dylibbundler` before sharing.
-- **Stereo output only**: input audio accepts any channel count (MC), but
-  it's always downmixed to stereo before encoding, matching typical stream
-  targets. See "Audio path" above for the downmix rule.
-- **Video format**: only char ARGB/RGB `jit_matrix` input is handled today
-  (this includes what the internal `jit.gl.asyncread` produces for the GL
-  path — it outputs a regular char matrix too).
-- **GL path history**: two real bugs found and fixed via live testing - the
-  original `"hiddenconnect"`-based delivery never worked at all (see git
-  log), and the follow-up fix only produced video after a `jit_matrix`
-  message had come through first, which an explicit-`bang`-plus-`@automatic`
-  fix attempt briefly regressed into the stream failing to go live at all.
-  Both are resolved now (single trigger source: `bang`, `@automatic 0`) and
-  confirmed working, including starting a session directly from a texture.
-  If the poll ever comes up empty, you'll see `error internal
-  jit.gl.asyncread has no out_name - matrixoutput may not have taken effect`
-  on the status outlet.
-- Audio (stereo or MC, downmixed), matrix-driven video, and `@gl_context`
-  GL video are all confirmed working end to end on YouTube.
+No license file is included yet — add one appropriate for your use case. Note that Homebrew's default FFmpeg build enables `libx264`, which requires `--enable-gpl`; if you distribute *compiled binaries* of this external linked against a GPL-enabled FFmpeg build, that carries GPL obligations regardless of how you license this repository's own source.

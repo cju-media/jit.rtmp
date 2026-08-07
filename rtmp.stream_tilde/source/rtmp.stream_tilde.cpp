@@ -182,8 +182,13 @@ public:
         description { "Sample rate (Hz) the audio is encoded at. Input is resampled to this rate." }
     };
 
-    attribute<bool> hwaccel { this, "hwaccel", true,
-        description { "Use hardware-accelerated H.264 encoding (VideoToolbox) when available." }
+    attribute<bool> hwaccel { this, "hwaccel", false,
+        description {
+            "Use hardware-accelerated H.264 encoding (VideoToolbox) instead of libx264. "
+            "Defaults off: VideoToolbox has shown RTMP/FLV compatibility issues in testing "
+            "(see README) that libx264 doesn't have. Try turning this on once the libx264 "
+            "path is confirmed working end-to-end, if you want the lower CPU usage."
+        }
     };
 
     attribute<int> keyframe_interval { this, "keyframe_interval", 60,
@@ -604,20 +609,35 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 
-        if (!warmup)
+        if (!warmup) {
+            post_status(std::string("status video priming: no frame arrived within 3s (extradata_size=")
+                        + std::to_string(m_video_ctx->extradata_size) + ", codec=" + m_video_ctx->codec->name + ")");
             return; // no video arrived yet; proceed without priming (fine for encoders that don't need it, e.g. libx264)
+        }
 
-        warmup->pts = 0;
+        int received_packets = 0;
+        // Use a pts strictly before the real stream's counter (which starts at 0 in
+        // run_encode_loop) - sending two frames with the same pts=0 back to back
+        // is a non-monotonic-timestamp violation most encoders are strict about,
+        // and could corrupt the DTS/PTS actually written for the real stream even
+        // though this warmup packet itself is discarded and never reaches the wire.
+        warmup->pts = -1;
         if (avcodec_send_frame(m_video_ctx, warmup) == 0) {
             AVPacket* pkt = av_packet_alloc();
-            while (avcodec_receive_packet(m_video_ctx, pkt) == 0)
+            while (avcodec_receive_packet(m_video_ctx, pkt) == 0) {
+                received_packets++;
                 av_packet_unref(pkt); // discard - the muxer isn't open yet
+            }
             av_packet_free(&pkt);
         }
         av_frame_free(&warmup);
 
         m_force_next_video_keyframe = true;
         avcodec_parameters_from_context(m_video_stream->codecpar, m_video_ctx); // refresh with now-populated extradata
+
+        post_status(std::string("status video priming: codec=") + m_video_ctx->codec->name
+                    + " warmup_packets=" + std::to_string(received_packets)
+                    + " extradata_size=" + std::to_string(m_video_ctx->extradata_size));
     }
 
     bool open_video_encoder() {
@@ -740,11 +760,34 @@ private:
         av_packet_free(&pkt);
     }
 
+    int m_video_packets_logged = 0;
+    int m_audio_packets_logged = 0;
+
     void write_packet(AVCodecContext* ctx, AVStream* stream, AVPacket* pkt) {
         pkt->stream_index = stream->index;
         av_packet_rescale_ts(pkt, ctx->time_base, stream->time_base);
-        av_interleaved_write_frame(m_fmt_ctx, pkt);
-        av_packet_unref(pkt);
+
+        bool is_video = (stream == m_video_stream);
+        int& logged = is_video ? m_video_packets_logged : m_audio_packets_logged;
+        bool should_log = logged < 5;
+        int64_t pts = pkt->pts, dts = pkt->dts;
+        int size = pkt->size;
+        bool key = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
+
+        int ret = av_interleaved_write_frame(m_fmt_ctx, pkt); // pkt is consumed/unref'd by this call regardless of result
+
+        if (ret < 0) {
+            char errbuf[AV_ERROR_MAX_STRING_SIZE] = { 0 };
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            post_status(std::string("error av_interleaved_write_frame failed (") + (is_video ? "video" : "audio")
+                        + "): " + errbuf);
+        }
+        else if (should_log) {
+            logged++;
+            post_status(std::string("status ") + (is_video ? "video" : "audio") + " packet #" + std::to_string(logged)
+                        + " pts=" + std::to_string(pts) + " dts=" + std::to_string(dts) + " size=" + std::to_string(size)
+                        + (is_video ? (std::string(" key=") + (key ? "1" : "0")) : ""));
+        }
     }
 
     // -----------------------------------------------------------------

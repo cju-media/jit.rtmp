@@ -868,6 +868,11 @@ private:
                 if (to_encode) {
                     to_encode->pts = video_pts_counter++;
                     if (m_force_next_video_keyframe) {
+                        // AV_FRAME_FLAG_KEY is not actually respected as a "force a
+                        // keyframe here" request by libx264 (confirmed live: every
+                        // packet, including this one, still came out key=0). The
+                        // real, documented mechanism is pict_type.
+                        to_encode->pict_type = AV_PICTURE_TYPE_I;
                         to_encode->flags |= AV_FRAME_FLAG_KEY;
                         m_force_next_video_keyframe = false;
                     }

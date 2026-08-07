@@ -9,16 +9,25 @@ Built with [Min-API](https://github.com/Cycling74/min-api) (C++) and
 
 ## Status
 
-Live-tested against YouTube: connects and goes live (`status connecting` →
-`status live`), with `jit.grab` feeding video via `jit_matrix`. Found and
-fixed a real bug along the way where YouTube received data and reported the
-stream as live but never actually showed video - a VideoToolbox
-extradata-timing issue (see `prime_video_encoder_extradata()` in the source
-and the git log for the full explanation). **That fix has not yet been
-re-verified live** - that's the next thing to confirm. Audio has not been
-separately confirmed working yet either. The `@gl_context`/`jit_gl_texture`
-GL-texture path is implemented the same way as the matrix path but hasn't
-been live-tested at all yet.
+**Confirmed working end-to-end on YouTube**: `jit.grab` video + `adc~` audio,
+both playing back correctly. Getting here surfaced three real, distinct bugs
+(see git log for full detail on each):
+
+1. VideoToolbox doesn't populate H.264 extradata (SPS/PPS) until after it's
+   encoded a frame, so the FLV header written at stream start had none -
+   fixed by priming the encoder before `avformat_write_header`.
+2. The forced-keyframe mechanism used the wrong field
+   (`AV_FRAME_FLAG_KEY` isn't respected by libx264 as a force-keyframe
+   request) - every transmitted packet was a non-keyframe, so nothing was
+   ever decodable. Fixed via `pict_type = AV_PICTURE_TYPE_I`.
+3. **DSP simply wasn't running** in testing - `operator()` never fires with
+   audio off, so audio was silently never encoded, and that alone was enough
+   to keep the whole stream from ever playing, not just leave it silent.
+   `start` now refuses to run (with a real console error) if DSP is off -
+   see the `start` message below.
+
+The `@gl_context`/`jit_gl_texture` GL-texture path is implemented the same
+way as the matrix path but hasn't been live-tested yet.
 
 ## How it works
 
@@ -79,7 +88,10 @@ been live-tested at all yet.
 
 ## Messages
 
-- `start` — connect and begin streaming (requires `@url` to be set first)
+- `start` — connect and begin streaming (requires `@url` to be set first,
+  and Max's DSP/audio engine to be running - `start` checks `sys_getdspstate()`
+  and refuses with a console error, `rtmp.stream~: DSP is off - ...`, if not;
+  visible even with nothing patched to the status outlet)
 - `stop` — stop streaming and disconnect
 - `jit_matrix <name>` — normally sent automatically by whatever Jitter object
   you patch into the left inlet

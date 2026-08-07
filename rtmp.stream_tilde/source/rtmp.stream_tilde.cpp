@@ -472,6 +472,17 @@ private:
             post_status("error already streaming - send 'stop' first");
             return;
         }
+        if (!c74::max::sys_getdspstate()) {
+            // A real Max console error (no print object / patch cord needed to see it) -
+            // this is very easy to miss otherwise: with DSP off, operator() never runs,
+            // so audio is silently never encoded (confirmed live: this alone was enough
+            // to make the whole stream appear to never actually play on the far end,
+            // not just be silent - see git log).
+            cerr << "rtmp.stream~: DSP is off - turn on audio (e.g. click an ezdac~, or "
+                 << "send \"start\" to a dac~) before sending 'start'. Refusing to start." << endl;
+            post_status("error DSP is off - turn on audio before starting");
+            return;
+        }
         std::string dest = url.get().c_str();
         if (dest.empty()) {
             post_status("error no url set - set the url attribute first, e.g. @url rtmp://...");

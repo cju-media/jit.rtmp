@@ -539,6 +539,8 @@ private:
             return;
         }
 
+        prime_video_encoder_extradata();
+
         if (!(m_fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
             ret = avio_open2(&m_fmt_ctx->pb, dest.c_str(), AVIO_FLAG_WRITE, &m_fmt_ctx->interrupt_callback, nullptr);
             if (ret < 0) {
@@ -567,6 +569,55 @@ private:
 
         cleanup_ffmpeg();
         post_status("status stopped");
+    }
+
+    // Some H.264 encoders - notably h264_videotoolbox - don't populate
+    // AVCodecContext::extradata (SPS/PPS) until *after* they've actually
+    // encoded a frame, unlike libx264 which has it immediately after
+    // avcodec_open2(). We copy extradata into the stream's codecpar (via
+    // avcodec_parameters_from_context in open_video_encoder) before any
+    // frame exists, so for those encoders it comes up empty. FLV needs a
+    // valid AVC sequence header written right after avformat_write_header,
+    // or players receive bytes but can never decode a single video frame -
+    // exactly "the stream shows as live/receiving but never plays".
+    //
+    // Fix: warm up the encoder with a throwaway frame (if one's available
+    // yet) *before* writing the header, discard its output, then refresh
+    // codecpar now that extradata should be populated. Force the next real
+    // frame to be a fresh keyframe afterward so the bitstream we actually
+    // transmit still starts clean.
+    void prime_video_encoder_extradata() {
+        using clock = std::chrono::steady_clock;
+        auto deadline = clock::now() + std::chrono::seconds(3);
+
+        AVFrame* warmup = nullptr;
+        while (clock::now() < deadline && !m_stop_requested.load(std::memory_order_relaxed)) {
+            {
+                std::lock_guard<std::mutex> lock(m_video_mutex);
+                if (m_latest_video_frame) {
+                    warmup = av_frame_alloc();
+                    av_frame_ref(warmup, m_latest_video_frame);
+                }
+            }
+            if (warmup)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+
+        if (!warmup)
+            return; // no video arrived yet; proceed without priming (fine for encoders that don't need it, e.g. libx264)
+
+        warmup->pts = 0;
+        if (avcodec_send_frame(m_video_ctx, warmup) == 0) {
+            AVPacket* pkt = av_packet_alloc();
+            while (avcodec_receive_packet(m_video_ctx, pkt) == 0)
+                av_packet_unref(pkt); // discard - the muxer isn't open yet
+            av_packet_free(&pkt);
+        }
+        av_frame_free(&warmup);
+
+        m_force_next_video_keyframe = true;
+        avcodec_parameters_from_context(m_video_stream->codecpar, m_video_ctx); // refresh with now-populated extradata
     }
 
     bool open_video_encoder() {
@@ -676,6 +727,7 @@ private:
     }
 
     int m_source_samplerate = 48000;
+    bool m_force_next_video_keyframe = false; // set by prime_video_encoder_extradata(), consumed in run_encode_loop()
 
     void flush_encoder(AVCodecContext* ctx, AVStream* stream) {
         if (!ctx)
@@ -772,6 +824,10 @@ private:
                 }
                 if (to_encode) {
                     to_encode->pts = video_pts_counter++;
+                    if (m_force_next_video_keyframe) {
+                        to_encode->flags |= AV_FRAME_FLAG_KEY;
+                        m_force_next_video_keyframe = false;
+                    }
                     if (avcodec_send_frame(m_video_ctx, to_encode) == 0) {
                         while (avcodec_receive_packet(m_video_ctx, pkt) == 0)
                             write_packet(m_video_ctx, m_video_stream, pkt);

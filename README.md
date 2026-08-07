@@ -9,11 +9,16 @@ Built with [Min-API](https://github.com/Cycling74/min-api) (C++) and
 
 ## Status
 
-Builds and links cleanly on this machine (Apple Silicon, FFmpeg 8.1 via
-Homebrew, Max 9). **It has not yet been tested against a live audio/video
-signal chain and a real RTMP endpoint inside Max** — do that next (see
-`patchers/rtmp.stream~.test.maxpat` in the installed package). Treat the
-first live test as the real verification step, not this build log.
+Live-tested against YouTube: connects and goes live (`status connecting` →
+`status live`), with `jit.grab` feeding video via `jit_matrix`. Found and
+fixed a real bug along the way where YouTube received data and reported the
+stream as live but never actually showed video - a VideoToolbox
+extradata-timing issue (see `prime_video_encoder_extradata()` in the source
+and the git log for the full explanation). **That fix has not yet been
+re-verified live** - that's the next thing to confirm. Audio has not been
+separately confirmed working yet either. The `@gl_context`/`jit_gl_texture`
+GL-texture path is implemented the same way as the matrix path but hasn't
+been live-tested at all yet.
 
 ## How it works
 

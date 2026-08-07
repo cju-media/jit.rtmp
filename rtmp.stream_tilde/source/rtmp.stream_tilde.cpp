@@ -513,7 +513,15 @@ private:
             return false;
         }
 
-        std::string spec = "@maxclass jit.gl.asyncread @matrixoutput 1 @automatic 1";
+        // @automatic 0: we drive capture ourselves with an explicit "bang" every poll
+        // tick (see poll_gl_asyncread_frame()). Having both @automatic's own
+        // Jitter-render-tied triggering AND our independent timer both firing reads
+        // against the same async PBO double-buffer is a plausible way to actually
+        // corrupt its internal state rather than just leave it stale - reported live:
+        // starting a stream from a texture went from "just black" to "cannot stream
+        // at all" the moment the explicit bang was added alongside @automatic 1.
+        // One trigger source only, now.
+        std::string spec = "@maxclass jit.gl.asyncread @matrixoutput 1 @automatic 0";
         if (!drawto_context.empty())
             spec += " @drawto " + drawto_context;
 
@@ -558,14 +566,16 @@ private:
         if (!m_gl_asyncread_box || m_gl_asyncread_out_name == symbol(""))
             return;
 
-        // Drive the capture explicitly rather than relying solely on @automatic 1.
-        // Reported live: a texture connected from the start of a session stayed
-        // black indefinitely, but started working the moment an unrelated
-        // jit_matrix message came through first - consistent with @automatic's
-        // capture being tied to Jitter's own render/scheduler tick rather than
-        // firing reliably on its own from a cold start. "bang" is documented
-        // (jit.gl.asyncread's maxref) as triggering a read on demand, so send it
-        // ourselves every poll instead of depending on incidental scheduler activity.
+        // We drive capture exclusively via this explicit "bang" (documented in
+        // jit.gl.asyncread's maxref) - @automatic is off (see ensure_gl_asyncread_helper())
+        // to avoid two independent trigger sources racing the same async PBO
+        // double-buffer, which is what broke streaming outright the one time both
+        // were active at once. Originally added because a texture connected from
+        // the start of a session stayed black indefinitely under @automatic alone,
+        // but only started working once an unrelated jit_matrix message came
+        // through first - consistent with @automatic's capture being tied to
+        // Jitter's own render/scheduler tick rather than firing reliably on its
+        // own from a cold start.
         c74::max::object_method(m_gl_asyncread_box, c74::max::gensym("bang"));
 
         void* matrix = c74::max::jit_object_findregistered(m_gl_asyncread_out_name);

@@ -30,14 +30,22 @@ both playing back correctly. Getting here surfaced three real, distinct bugs
    originally relied on - fixed by polling its `out_name` matrix directly
    instead. See "GL texture input" below.
 
-The `out_name`-polling fix for `@gl_context` is confirmed working live. The
-`jit_gl_texture` patch-cable path (multi-pass/offscreen textures) shares the
-same polling fix but hasn't been live-tested on its own yet.
+**MC audio input is confirmed working live** - the object inherits
+`mc_operator<>` instead of `vector_operator<>`, and the right inlet accepts
+any channel count, downmixed to stereo (see "How it works" below).
 
-**MC audio input is new and not yet live-tested** - the object now inherits
-`mc_operator<>` instead of `vector_operator<>` and the right inlet accepts
-any channel count, downmixed to stereo (see "How it works" below). Confirmed
-compiling/linking and loading without crashing; needs a live audio test next.
+**The GL path (`@gl_context`) is still broken, currently worse than before.**
+Timeline: the `out_name`-polling fix got video flowing, but only after a
+`jit_matrix` message had come through first - starting a session directly
+from a texture stayed black. An attempted fix (explicitly `bang`-ing
+`jit.gl.asyncread` every poll tick, alongside its own `@automatic 1`)
+regressed this from "black video" to **the stream failing to go live on
+YouTube's end at all** (stuck on "preparing stream", despite a solid RTMP
+connection) - almost certainly two independent trigger sources racing the
+same async PBO double-buffer. Reverted to a single trigger source: explicit
+`bang` only, `@automatic 0`. **Not yet re-verified live** - starting a
+session directly from a texture (the original failing case) is the next
+thing to test.
 
 ## How it works
 

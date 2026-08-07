@@ -178,8 +178,8 @@
                     "numinlets": 2,
                     "numoutlets": 1,
                     "outlettype": [ "" ],
-                    "patching_rect": [ 30.0, 300.0, 197.0, 22.0 ],
-                    "text": "rtmp.stream~ @gl_context display1"
+                    "patching_rect": [ 30.0, 300.0, 80.0, 22.0 ],
+                    "text": "rtmp.stream~"
                 }
             },
             {
@@ -262,7 +262,7 @@
                     "maxclass": "comment",
                     "numinlets": 1,
                     "numoutlets": 0,
-                    "patching_rect": [ 295.0, 262.0, 200.0, 20.0 ],
+                    "patching_rect": [ 546.0, 278.0, 200.0, 20.0 ],
                     "text": "<- enable video capture loop"
                 }
             },
@@ -302,7 +302,7 @@
                     "maxclass": "comment",
                     "numinlets": 1,
                     "numoutlets": 0,
-                    "patching_rect": [ 135.0, 264.0, 300.0, 20.0 ],
+                    "patching_rect": [ 135.0, 270.0, 330.0, 20.0 ],
                     "text": "packs adc~'s 2 mono channels into 1 MC cable for the demo"
                 }
             },
@@ -313,7 +313,7 @@
                     "maxclass": "comment",
                     "numinlets": 1,
                     "numoutlets": 0,
-                    "patching_rect": [ 30.0, 400.0, 620.0, 47.0 ],
+                    "patching_rect": [ 30.0, 400.0, 716.0, 47.0 ],
                     "text": "Notes: left inlet is messages only (jit_matrix / jit_gl_texture / start / stop / url / attrs). Right inlet is a single MC audio inlet - any channel count, downmixed to stereo for the stream. The object accepts char ARGB or RGB jit_matrix data (jit.grab's default output is fine as-is). The status outlet reports \"status connecting\", \"status live\", \"status stopped\", and \"error ...\" messages - watch the Max console."
                 }
             }
@@ -351,6 +351,12 @@
             },
             {
                 "patchline": {
+                    "destination": [ "obj_rtmp", 0 ],
+                    "source": [ "obj-1", 0 ]
+                }
+            },
+            {
+                "patchline": {
                     "destination": [ "obj_grab", 0 ],
                     "source": [ "obj-2", 0 ]
                 }
@@ -375,6 +381,24 @@
             },
             {
                 "patchline": {
+                    "destination": [ "obj_mcpack", 1 ],
+                    "source": [ "obj_adc", 1 ]
+                }
+            },
+            {
+                "patchline": {
+                    "destination": [ "obj_mcpack", 0 ],
+                    "source": [ "obj_adc", 0 ]
+                }
+            },
+            {
+                "patchline": {
+                    "destination": [ "obj_rtmp", 1 ],
+                    "source": [ "obj_mcpack", 0 ]
+                }
+            },
+            {
+                "patchline": {
                     "destination": [ "obj_grab", 0 ],
                     "source": [ "obj_qmetro", 0 ]
                 }
@@ -389,24 +413,6 @@
                 "patchline": {
                     "destination": [ "obj_qmetro", 0 ],
                     "source": [ "obj_toggle", 0 ]
-                }
-            },
-            {
-                "patchline": {
-                    "destination": [ "obj_mcpack", 0 ],
-                    "source": [ "obj_adc", 0 ]
-                }
-            },
-            {
-                "patchline": {
-                    "destination": [ "obj_mcpack", 1 ],
-                    "source": [ "obj_adc", 1 ]
-                }
-            },
-            {
-                "patchline": {
-                    "destination": [ "obj_rtmp", 1 ],
-                    "source": [ "obj_mcpack", 0 ]
                 }
             }
         ],

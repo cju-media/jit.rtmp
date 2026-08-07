@@ -92,9 +92,14 @@ cmake --build build
 ```
 
 The built external lands at `build/externals/rtmp.stream~.mxo` and is
-symlinked into `~/Documents/Max 9/Packages/RTMP-Max-Output/externals`, so
-rebuilding here picks up automatically in Max (quit/reopen the patch, or the
-whole app, to reload the external after a rebuild).
+symlinked into `~/Documents/Max 9/Packages/RTMP-Max-Output/externals`.
+
+**Important**: Max only loads a given external's compiled code once per app
+launch. Reopening the patch (or even closing/reopening the object box) after
+a rebuild does *not* pick up the new code — it keeps running whatever was
+loaded first. **Fully quit and relaunch Max** after every rebuild, or you'll
+see stale-code symptoms like `"<attr>" is not a valid attribute argument`
+for attributes that very much do exist in the source you just built.
 
 ## Known limitations / follow-ups
 

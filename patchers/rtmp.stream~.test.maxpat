@@ -287,13 +287,34 @@
             },
             {
                 "box": {
+                    "id": "obj_mcpack",
+                    "maxclass": "newobj",
+                    "numinlets": 2,
+                    "numoutlets": 1,
+                    "outlettype": [ "multichannelsignal" ],
+                    "patching_rect": [ 50.0, 262.0, 80.0, 22.0 ],
+                    "text": "mc.pack~ 2"
+                }
+            },
+            {
+                "box": {
+                    "id": "comment_mc",
+                    "maxclass": "comment",
+                    "numinlets": 1,
+                    "numoutlets": 0,
+                    "patching_rect": [ 135.0, 264.0, 300.0, 20.0 ],
+                    "text": "packs adc~'s 2 mono channels into 1 MC cable for the demo"
+                }
+            },
+            {
+                "box": {
                     "id": "comment_note",
                     "linecount": 3,
                     "maxclass": "comment",
                     "numinlets": 1,
                     "numoutlets": 0,
                     "patching_rect": [ 30.0, 400.0, 620.0, 47.0 ],
-                    "text": "Notes: the object accepts char ARGB or RGB jit_matrix data (jit.grab's default output is fine as-is). Left inlet takes both signal audio-in-L and jit_matrix / start / stop / url messages. The status outlet reports \"status connecting\", \"status live\", \"status stopped\", and \"error ...\" messages - watch the Max console."
+                    "text": "Notes: left inlet is messages only (jit_matrix / jit_gl_texture / start / stop / url / attrs). Right inlet is a single MC audio inlet - any channel count, downmixed to stereo for the stream. The object accepts char ARGB or RGB jit_matrix data (jit.grab's default output is fine as-is). The status outlet reports \"status connecting\", \"status live\", \"status stopped\", and \"error ...\" messages - watch the Max console."
                 }
             }
         ],
@@ -354,12 +375,6 @@
             },
             {
                 "patchline": {
-                    "destination": [ "obj_rtmp", 0 ],
-                    "source": [ "obj_grab", 0 ]
-                }
-            },
-            {
-                "patchline": {
                     "destination": [ "obj_grab", 0 ],
                     "source": [ "obj_qmetro", 0 ]
                 }
@@ -374,6 +389,24 @@
                 "patchline": {
                     "destination": [ "obj_qmetro", 0 ],
                     "source": [ "obj_toggle", 0 ]
+                }
+            },
+            {
+                "patchline": {
+                    "destination": [ "obj_mcpack", 0 ],
+                    "source": [ "obj_adc", 0 ]
+                }
+            },
+            {
+                "patchline": {
+                    "destination": [ "obj_mcpack", 1 ],
+                    "source": [ "obj_adc", 1 ]
+                }
+            },
+            {
+                "patchline": {
+                    "destination": [ "obj_rtmp", 1 ],
+                    "source": [ "obj_mcpack", 0 ]
                 }
             }
         ],

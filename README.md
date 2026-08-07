@@ -30,22 +30,35 @@ both playing back correctly. Getting here surfaced three real, distinct bugs
    originally relied on - fixed by polling its `out_name` matrix directly
    instead. See "GL texture input" below.
 
-The `out_name`-polling fix for `@gl_context` has not yet been re-verified
-live - that's the next thing to confirm. The `jit_gl_texture` patch-cable
-path (multi-pass/offscreen textures) shares the same polling fix but hasn't
-been live-tested at all yet.
+The `out_name`-polling fix for `@gl_context` is confirmed working live. The
+`jit_gl_texture` patch-cable path (multi-pass/offscreen textures) shares the
+same polling fix but hasn't been live-tested on its own yet.
+
+**MC audio input is new and not yet live-tested** - the object now inherits
+`mc_operator<>` instead of `vector_operator<>` and the right inlet accepts
+any channel count, downmixed to stereo (see "How it works" below). Confirmed
+compiling/linking and loading without crashing; needs a live audio test next.
 
 ## How it works
 
-- **Inlets**: left inlet takes the left audio channel *and* doubles as the
-  message inlet (`jit_matrix`, `start`, `stop`, `url ...`, etc.); right inlet
-  is the right audio channel.
+- **Inlets**: left inlet is messages only (`jit_matrix`, `jit_gl_texture`,
+  `start`, `stop`, `url ...`, attributes, etc. — no audio). Right inlet is a
+  single MC (multichannel) audio inlet, accepting any number of channels
+  through one cable.
 - **Outlet**: status/error messages (`status connecting`, `status live`,
   `status stopped`, `error ...`).
-- **Audio path**: `operator()` on Max's audio thread copies each vector into a
-  lock-free SPSC ring buffer (no locks/allocation on the realtime thread). The
-  encoder thread drains it, resamples to the target rate with `libswresample`,
-  and encodes fixed-size AAC frames via an `AVAudioFifo`.
+- **Audio path**: the object inherits Min-API's `mc_operator<>`, which makes
+  the audio inlet MC-capable — `audio_bundle::channel_count()` reflects
+  however many channels are actually connected, dynamically. Since RTMP/FLV
+  audio is essentially always expected to be stereo AAC by real-world
+  consumers (YouTube, Twitch, etc.), `operator()` downmixes on the audio
+  thread before anything else happens: 1 channel duplicates to L/R; 2+
+  channels alternate (even index → L, odd index → R), each side averaged
+  over however many landed on it to avoid gain buildup. The resulting stereo
+  pair is copied into a lock-free SPSC ring buffer (no locks/allocation on
+  the realtime thread). The encoder thread drains it, resamples to the
+  target rate with `libswresample`, and encodes fixed-size AAC frames via an
+  `AVAudioFifo`.
 - **Video path**: the `jit_matrix` message handler (fires on whatever thread
   Jitter delivers on — not the audio thread) locks the matrix, reads it with
   `libswscale` straight into a YUV420P frame at the configured output

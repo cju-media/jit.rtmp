@@ -127,16 +127,16 @@ private:
 
 } // namespace
 
-class rtmp_stream : public object<rtmp_stream>, public vector_operator<> {
+class rtmp_stream : public object<rtmp_stream>, public mc_operator<> {
 public:
     MIN_DESCRIPTION { "Stream MSP audio and Jitter video to an RTMP server as H.264/AAC/FLV." };
     MIN_TAGS { "audio, video, streaming, rtmp" };
     MIN_AUTHOR { "Cameron Johnston" };
     MIN_RELATED { "jit.record, adstatus, jit.qt.record" };
 
-    inlet<>  in_audio_l { this, "(signal) audio in L, also accepts jit_matrix / start / stop", "signal" };
-    inlet<>  in_audio_r { this, "(signal) audio in R", "signal" };
-    outlet<> out_status { this, "(anything) status / error messages" };
+    inlet<>  in_messages { this, "(anything) jit_matrix / jit_gl_texture / start / stop / url / etc." };
+    inlet<>  in_audio_mc { this, "(multichannelsignal) audio in - any channel count, downmixed to stereo for the stream" };
+    outlet<> out_status  { this, "(anything) status / error messages" };
 
     rtmp_stream(const atoms& args = {}) {
         if (!args.empty())
@@ -253,18 +253,48 @@ public:
 
     // -----------------------------------------------------------------
     // Audio: called on Max's audio thread. Must never block or allocate.
+    //
+    // in_audio_mc is MC-capable and carries any number of channels; the stream
+    // itself is always stereo AAC (what every real RTMP consumer expects), so
+    // we downmix here: 1 channel duplicates to L/R, 2+ channels alternate
+    // (even index -> L, odd index -> R), each side averaged over however many
+    // channels actually land on it, to avoid gain buildup when more than 2
+    // channels are connected.
     // -----------------------------------------------------------------
     void operator()(audio_bundle input, audio_bundle output) {
         if (!m_streaming.load(std::memory_order_relaxed))
             return;
 
-        double* chans[kAudioChannels];
-        double  silence[4096] = { 0.0 };
-        long    frame_count   = input.frame_count();
+        long ch_count    = input.channel_count();
+        long frame_count = input.frame_count();
 
-        for (int c = 0; c < kAudioChannels; ++c)
-            chans[c] = (c < input.channel_count()) ? input.samples(c) : silence;
+        m_downmix_l.assign(frame_count, 0.0);
+        m_downmix_r.assign(frame_count, 0.0);
+        std::vector<double>& l_buf = m_downmix_l;
+        std::vector<double>& r_buf = m_downmix_r;
 
+        if (ch_count <= 0) {
+            // nothing connected - write silence so the ring buffer/encoder still advances
+        }
+        else if (ch_count == 1) {
+            double* mono = input.samples(0);
+            for (long i = 0; i < frame_count; ++i)
+                l_buf[i] = r_buf[i] = mono[i];
+        }
+        else {
+            long l_n = 0, r_n = 0;
+            for (long c = 0; c < ch_count; ++c) {
+                double* s = input.samples(c);
+                double* dst = (c % 2 == 0) ? l_buf.data() : r_buf.data();
+                for (long i = 0; i < frame_count; ++i)
+                    dst[i] += s[i];
+                if (c % 2 == 0) l_n++; else r_n++;
+            }
+            if (l_n > 1) for (long i = 0; i < frame_count; ++i) l_buf[i] /= l_n;
+            if (r_n > 1) for (long i = 0; i < frame_count; ++i) r_buf[i] /= r_n;
+        }
+
+        double* chans[kAudioChannels] = { l_buf.data(), r_buf.data() };
         m_audio_ring.write(chans, frame_count);
     }
 
@@ -283,6 +313,11 @@ private:
 
     // === Audio ring buffer (lock-free) ===
     audio_ring m_audio_ring;
+
+    // Scratch downmix buffers for operator() (audio thread only). Sized lazily
+    // on first use per DSP compile; std::vector::assign doesn't reallocate once
+    // already the right size, so this is a one-time cost, not a per-block one.
+    std::vector<double> m_downmix_l, m_downmix_r;
 
     // === Encoder thread & FFmpeg state (owned exclusively by encoder thread once started) ===
     std::thread       m_encoder_thread;

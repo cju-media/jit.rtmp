@@ -1,0 +1,696 @@
+/// @file
+/// rtmp.stream~ - Stream MSP audio + Jitter video to an RTMP server.
+///
+/// Encodes incoming audio (stereo signal inlets) with AAC and incoming video
+/// (jit_matrix messages) with H.264, muxes them into FLV, and pushes the result
+/// to an RTMP URL via libavformat. All encoding/network I/O happens on a
+/// dedicated background thread so Max's audio and scheduler threads never block.
+
+extern "C" {
+#include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
+#include <libavutil/opt.h>
+#include <libavutil/imgutils.h>
+#include <libavutil/time.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/audio_fifo.h>
+#include <libswscale/swscale.h>
+#include <libswresample/swresample.h>
+}
+
+#include "c74_min.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+using namespace c74::min;
+
+namespace {
+
+constexpr int kAudioChannels    = 2;
+constexpr int kRingCapacityPow2 = 1 << 18; // frames per channel worth of interleaved storage slots (see below)
+constexpr int kRingMask         = kRingCapacityPow2 - 1;
+
+// ---------------------------------------------------------------------------
+// Lock-free single-producer/single-consumer ring buffer for interleaved
+// stereo audio (doubles). Producer = Max audio thread. Consumer = encoder
+// thread. No locks, no allocation on the hot path.
+// ---------------------------------------------------------------------------
+class audio_ring {
+public:
+    audio_ring() { m_data.resize(kRingCapacityPow2 * kAudioChannels, 0.0); }
+
+    // Called from the audio thread. Never blocks. Drops audio if the
+    // consumer has fallen too far behind (better than an unbounded stream
+    // going out of sync / running out of memory).
+    void write(double* const* channels, long frame_count) {
+        size_t w = m_write.load(std::memory_order_relaxed);
+        size_t r = m_read.load(std::memory_order_acquire);
+        size_t free_frames = kRingCapacityPow2 - (w - r);
+
+        if ((size_t)frame_count > free_frames) {
+            // Overflow: drop the oldest data by advancing the read pointer.
+            // This keeps latency bounded instead of growing without limit.
+            size_t drop = frame_count - free_frames;
+            m_read.store(r + drop, std::memory_order_release);
+        }
+
+        for (long i = 0; i < frame_count; ++i) {
+            size_t idx = (w + (size_t)i) & kRingMask;
+            for (int c = 0; c < kAudioChannels; ++c) {
+                m_data[idx * kAudioChannels + c] = channels[c][i];
+            }
+        }
+        m_write.store(w + (size_t)frame_count, std::memory_order_release);
+    }
+
+    // Called from the encoder thread only.
+    size_t available_frames() const {
+        size_t w = m_write.load(std::memory_order_acquire);
+        size_t r = m_read.load(std::memory_order_relaxed);
+        return w - r;
+    }
+
+    // Reads up to frame_count frames (interleaved) into dst. Returns frames actually read.
+    size_t read(double* dst_interleaved, size_t frame_count) {
+        size_t avail = available_frames();
+        size_t n     = std::min(avail, frame_count);
+        size_t r     = m_read.load(std::memory_order_relaxed);
+
+        for (size_t i = 0; i < n; ++i) {
+            size_t idx = (r + i) & kRingMask;
+            for (int c = 0; c < kAudioChannels; ++c) {
+                dst_interleaved[i * kAudioChannels + c] = m_data[idx * kAudioChannels + c];
+            }
+        }
+        m_read.store(r + n, std::memory_order_release);
+        return n;
+    }
+
+    void reset() {
+        m_read.store(0);
+        m_write.store(0);
+    }
+
+private:
+    std::vector<double>     m_data;
+    std::atomic<size_t>     m_read { 0 };
+    std::atomic<size_t>     m_write { 0 };
+};
+
+// Small helper: deferred status/error messages need to cross from the encoder
+// thread back to Max's main thread. We stash the latest message here and
+// nudge a c74::min::queue<> (qelem) to drain it on the main thread.
+class status_mailbox {
+public:
+    void post(std::string msg) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_pending.push_back(std::move(msg));
+    }
+
+    std::vector<std::string> drain() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::vector<std::string> out;
+        out.swap(m_pending);
+        return out;
+    }
+
+private:
+    std::mutex               m_mutex;
+    std::vector<std::string> m_pending;
+};
+
+} // namespace
+
+class rtmp_stream : public object<rtmp_stream>, public vector_operator<> {
+public:
+    MIN_DESCRIPTION { "Stream MSP audio and Jitter video to an RTMP server as H.264/AAC/FLV." };
+    MIN_TAGS { "audio, video, streaming, rtmp" };
+    MIN_AUTHOR { "Cameron Johnston" };
+    MIN_RELATED { "jit.record, adstatus, jit.qt.record" };
+
+    inlet<>  in_audio_l { this, "(signal) audio in L, also accepts jit_matrix / start / stop", "signal" };
+    inlet<>  in_audio_r { this, "(signal) audio in R", "signal" };
+    outlet<> out_status { this, "(anything) status / error messages" };
+
+    rtmp_stream(const atoms& args = {}) {
+        if (!args.empty())
+            url = args[0];
+        m_status_queue_ptr = std::make_unique<queue<>>(this, MIN_FUNCTION {
+            drain_status();
+            return atoms {};
+        });
+    }
+
+    ~rtmp_stream() {
+        stop_streaming();
+    }
+
+    // -----------------------------------------------------------------
+    // Attributes
+    // -----------------------------------------------------------------
+    attribute<symbol> url { this, "url", "",
+        description { "RTMP URL to publish to, e.g. rtmp://a.rtmp.youtube.com/live2/STREAM-KEY" }
+    };
+
+    attribute<int> out_width { this, "width", 1280,
+        description { "Output video width in pixels." }
+    };
+
+    attribute<int> out_height { this, "height", 720,
+        description { "Output video height in pixels." }
+    };
+
+    attribute<number> fps { this, "fps", 30.0,
+        description { "Output video frame rate." }
+    };
+
+    attribute<int> video_kbps { this, "video_kbps", 4000,
+        description { "Video encoder target bitrate in kbit/s." }
+    };
+
+    attribute<int> audio_kbps { this, "audio_kbps", 160,
+        description { "Audio (AAC) encoder target bitrate in kbit/s." }
+    };
+
+    attribute<int> audio_samplerate { this, "samplerate", 48000,
+        description { "Sample rate (Hz) the audio is encoded at. Input is resampled to this rate." }
+    };
+
+    attribute<bool> hwaccel { this, "hwaccel", true,
+        description { "Use hardware-accelerated H.264 encoding (VideoToolbox) when available." }
+    };
+
+    attribute<int> keyframe_interval { this, "keyframe_interval", 60,
+        description { "Keyframe (GOP) interval in frames. 0 = derive from fps * 2." }
+    };
+
+    // -----------------------------------------------------------------
+    // Messages
+    // -----------------------------------------------------------------
+    message<> start { this, "start", "Connect and begin streaming to the configured url.",
+        MIN_FUNCTION {
+            start_streaming();
+            return {};
+        }
+    };
+
+    message<> stop { this, "stop", "Stop streaming and disconnect.",
+        MIN_FUNCTION {
+            stop_streaming();
+            return {};
+        }
+    };
+
+    message<> jit_matrix { this, "jit_matrix", "Receive a video frame from Jitter.",
+        MIN_FUNCTION {
+            handle_jit_matrix(args);
+            return {};
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Audio: called on Max's audio thread. Must never block or allocate.
+    // -----------------------------------------------------------------
+    void operator()(audio_bundle input, audio_bundle output) {
+        if (!m_streaming.load(std::memory_order_relaxed))
+            return;
+
+        double* chans[kAudioChannels];
+        double  silence[4096] = { 0.0 };
+        long    frame_count   = input.frame_count();
+
+        for (int c = 0; c < kAudioChannels; ++c)
+            chans[c] = (c < input.channel_count()) ? input.samples(c) : silence;
+
+        m_audio_ring.write(chans, frame_count);
+    }
+
+private:
+    // === Video conversion state (touched by main/Jitter thread + protected by mutex for encoder thread reads) ===
+    std::mutex m_video_mutex;
+    AVFrame*   m_latest_video_frame = nullptr; // owned; always a fully-converted YUV420P frame at output resolution
+    SwsContext* m_sws_ctx            = nullptr;
+    long        m_sws_src_w = 0, m_sws_src_h = 0;
+    AVPixelFormat m_sws_src_fmt = AV_PIX_FMT_NONE;
+
+    // === Audio ring buffer (lock-free) ===
+    audio_ring m_audio_ring;
+
+    // === Encoder thread & FFmpeg state (owned exclusively by encoder thread once started) ===
+    std::thread       m_encoder_thread;
+    std::atomic<bool> m_streaming { false };
+    std::atomic<bool> m_stop_requested { false };
+
+    AVFormatContext* m_fmt_ctx      = nullptr;
+    AVCodecContext*  m_video_ctx    = nullptr;
+    AVCodecContext*  m_audio_ctx    = nullptr;
+    AVStream*        m_video_stream = nullptr;
+    AVStream*        m_audio_stream = nullptr;
+    SwrContext*      m_swr_ctx      = nullptr;
+    AVAudioFifo*     m_audio_fifo   = nullptr;
+
+    status_mailbox              m_mailbox;
+    std::unique_ptr<queue<>>    m_status_queue_ptr;
+
+    void post_status(const std::string& msg) {
+        m_mailbox.post(msg);
+        if (m_status_queue_ptr)
+            m_status_queue_ptr->set();
+    }
+
+    void drain_status() {
+        for (auto& msg : m_mailbox.drain())
+            out_status.send(symbol(msg));
+    }
+
+    // -----------------------------------------------------------------
+    // Video: receive + convert a jit_matrix. Runs on whatever thread
+    // delivered the message (main / Jitter scheduler) - not the audio thread.
+    // -----------------------------------------------------------------
+    void handle_jit_matrix(const atoms& args) {
+        if (args.empty())
+            return;
+
+        symbol mname  = args[0];
+        void*  matrix = c74::max::jit_object_findregistered(mname);
+        if (!matrix || !c74::max::jit_object_method(matrix, c74::max::_jit_sym_class_jit_matrix))
+            return;
+
+        long savelock = (long)c74::max::jit_object_method(matrix, c74::max::_jit_sym_lock, 1);
+
+        c74::max::t_jit_matrix_info info;
+        char* bp = nullptr;
+        c74::max::jit_object_method(matrix, c74::max::_jit_sym_getinfo, &info);
+        c74::max::jit_object_method(matrix, c74::max::_jit_sym_getdata, &bp);
+
+        if (bp && info.type == c74::max::_jit_sym_char && (info.planecount == 4 || info.planecount == 3)) {
+            convert_and_store_frame(info, (unsigned char*)bp);
+        }
+        else if (bp) {
+            post_status("error jit_matrix must be char type with 3 or 4 planes (use jit.matrix 4 char WxH)");
+        }
+
+        c74::max::jit_object_method(matrix, c74::max::_jit_sym_lock, (void*)savelock);
+    }
+
+    void convert_and_store_frame(const c74::max::t_jit_matrix_info& info, unsigned char* data) {
+        if (!m_streaming.load(std::memory_order_relaxed))
+            return;
+
+        long src_w = info.dim[0];
+        long src_h = (info.dimcount > 1) ? info.dim[1] : 1;
+        if (src_w <= 0 || src_h <= 0)
+            return;
+
+        AVPixelFormat src_fmt = (info.planecount == 4) ? AV_PIX_FMT_ARGB : AV_PIX_FMT_RGB24;
+        int dst_w = out_width, dst_h = out_height;
+
+        // (Re)build the scaler if the source format/size changed.
+        if (!m_sws_ctx || src_w != m_sws_src_w || src_h != m_sws_src_h || src_fmt != m_sws_src_fmt) {
+            if (m_sws_ctx) {
+                sws_freeContext(m_sws_ctx);
+                m_sws_ctx = nullptr;
+            }
+            m_sws_ctx = sws_getContext(
+                (int)src_w, (int)src_h, src_fmt,
+                dst_w, dst_h, AV_PIX_FMT_YUV420P,
+                SWS_BILINEAR, nullptr, nullptr, nullptr
+            );
+            m_sws_src_w   = src_w;
+            m_sws_src_h   = src_h;
+            m_sws_src_fmt = src_fmt;
+            if (!m_sws_ctx) {
+                post_status("error could not create video scaler");
+                return;
+            }
+        }
+
+        AVFrame* frame = av_frame_alloc();
+        frame->format  = AV_PIX_FMT_YUV420P;
+        frame->width   = dst_w;
+        frame->height  = dst_h;
+        if (av_frame_get_buffer(frame, 32) < 0) {
+            av_frame_free(&frame);
+            return;
+        }
+
+        const uint8_t* src_slices[1] = { data };
+        int            src_stride[1] = { (int)info.dimstride[1] };
+
+        sws_scale(m_sws_ctx, src_slices, src_stride, 0, (int)src_h, frame->data, frame->linesize);
+
+        {
+            std::lock_guard<std::mutex> lock(m_video_mutex);
+            if (m_latest_video_frame)
+                av_frame_free(&m_latest_video_frame);
+            m_latest_video_frame = frame;
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Stream lifecycle
+    // -----------------------------------------------------------------
+    void start_streaming() {
+        if (m_streaming.load()) {
+            post_status("error already streaming - send 'stop' first");
+            return;
+        }
+        std::string dest = url.get().c_str();
+        if (dest.empty()) {
+            post_status("error no url set - set the url attribute first, e.g. @url rtmp://...");
+            return;
+        }
+
+        m_stop_requested.store(false);
+        m_audio_ring.reset();
+
+        m_encoder_thread = std::thread([this, dest]() {
+            encoder_thread_main(dest);
+        });
+        m_streaming.store(true);
+        post_status("status connecting");
+    }
+
+    void stop_streaming() {
+        if (!m_streaming.load() && !m_encoder_thread.joinable())
+            return;
+
+        m_stop_requested.store(true);
+        m_streaming.store(false);
+
+        if (m_encoder_thread.joinable())
+            m_encoder_thread.join();
+
+        std::lock_guard<std::mutex> lock(m_video_mutex);
+        if (m_latest_video_frame)
+            av_frame_free(&m_latest_video_frame);
+        if (m_sws_ctx) {
+            sws_freeContext(m_sws_ctx);
+            m_sws_ctx = nullptr;
+        }
+    }
+
+    static int interrupt_cb(void* ctx) {
+        auto* self = static_cast<rtmp_stream*>(ctx);
+        return self->m_stop_requested.load(std::memory_order_relaxed) ? 1 : 0;
+    }
+
+    // -----------------------------------------------------------------
+    // Encoder thread: owns the AVFormatContext exclusively. Does all
+    // encoding, muxing and network I/O. Never touches Max's audio path.
+    // -----------------------------------------------------------------
+    void encoder_thread_main(const std::string& dest) {
+        int ret = 0;
+
+        avformat_network_init();
+
+        if (avformat_alloc_output_context2(&m_fmt_ctx, nullptr, "flv", dest.c_str()) < 0 || !m_fmt_ctx) {
+            post_status("error could not create output context for " + dest);
+            m_streaming.store(false);
+            return;
+        }
+
+        m_fmt_ctx->interrupt_callback.callback = interrupt_cb;
+        m_fmt_ctx->interrupt_callback.opaque   = this;
+
+        if (!open_video_encoder() || !open_audio_encoder()) {
+            cleanup_ffmpeg();
+            m_streaming.store(false);
+            return;
+        }
+
+        if (!(m_fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
+            ret = avio_open2(&m_fmt_ctx->pb, dest.c_str(), AVIO_FLAG_WRITE, &m_fmt_ctx->interrupt_callback, nullptr);
+            if (ret < 0) {
+                post_status("error could not open connection to " + dest);
+                cleanup_ffmpeg();
+                m_streaming.store(false);
+                return;
+            }
+        }
+
+        if (avformat_write_header(m_fmt_ctx, nullptr) < 0) {
+            post_status("error could not write header (check url / server)");
+            cleanup_ffmpeg();
+            m_streaming.store(false);
+            return;
+        }
+
+        post_status("status live");
+
+        run_encode_loop();
+
+        // Flush encoders
+        flush_encoder(m_video_ctx, m_video_stream);
+        flush_encoder(m_audio_ctx, m_audio_stream);
+        av_write_trailer(m_fmt_ctx);
+
+        cleanup_ffmpeg();
+        post_status("status stopped");
+    }
+
+    bool open_video_encoder() {
+        const AVCodec* codec = nullptr;
+        if (hwaccel)
+            codec = avcodec_find_encoder_by_name("h264_videotoolbox");
+        if (!codec)
+            codec = avcodec_find_encoder_by_name("libx264");
+        if (!codec)
+            codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+        if (!codec) {
+            post_status("error no H.264 encoder available");
+            return false;
+        }
+
+        m_video_stream = avformat_new_stream(m_fmt_ctx, nullptr);
+        if (!m_video_stream)
+            return false;
+
+        m_video_ctx = avcodec_alloc_context3(codec);
+        m_video_ctx->width     = out_width;
+        m_video_ctx->height    = out_height;
+        m_video_ctx->pix_fmt   = AV_PIX_FMT_YUV420P;
+        double fps_val         = std::max(1.0, (double)fps);
+        m_video_ctx->time_base = av_d2q(1.0 / fps_val, 100000);
+        m_video_ctx->framerate = av_d2q(fps_val, 100000);
+        m_video_ctx->bit_rate  = (int64_t)video_kbps * 1000;
+        m_video_ctx->gop_size  = (keyframe_interval > 0) ? (int)keyframe_interval : (int)std::lround(fps_val * 2.0);
+        m_video_ctx->max_b_frames = 0; // low latency
+
+        if (m_fmt_ctx->oformat->flags & AVFMT_GLOBALHEADER)
+            m_video_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
+        AVDictionary* opts = nullptr;
+        if (std::strcmp(codec->name, "libx264") == 0) {
+            av_dict_set(&opts, "preset", "veryfast", 0);
+            av_dict_set(&opts, "tune", "zerolatency", 0);
+        }
+
+        if (avcodec_open2(m_video_ctx, codec, &opts) < 0) {
+            av_dict_free(&opts);
+            post_status(std::string("error could not open video encoder ") + codec->name);
+            return false;
+        }
+        av_dict_free(&opts);
+
+        if (avcodec_parameters_from_context(m_video_stream->codecpar, m_video_ctx) < 0)
+            return false;
+        m_video_stream->time_base = m_video_ctx->time_base;
+
+        return true;
+    }
+
+    bool open_audio_encoder() {
+        const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
+        if (!codec) {
+            post_status("error no AAC encoder available");
+            return false;
+        }
+
+        m_audio_stream = avformat_new_stream(m_fmt_ctx, nullptr);
+        if (!m_audio_stream)
+            return false;
+
+        m_audio_ctx = avcodec_alloc_context3(codec);
+        m_audio_ctx->sample_rate    = audio_samplerate;
+        m_audio_ctx->sample_fmt     = AV_SAMPLE_FMT_FLTP;
+        av_channel_layout_default(&m_audio_ctx->ch_layout, kAudioChannels);
+        m_audio_ctx->bit_rate       = (int64_t)audio_kbps * 1000;
+        m_audio_ctx->time_base      = AVRational { 1, audio_samplerate };
+
+        if (m_fmt_ctx->oformat->flags & AVFMT_GLOBALHEADER)
+            m_audio_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
+        if (avcodec_open2(m_audio_ctx, codec, nullptr) < 0) {
+            post_status("error could not open AAC encoder");
+            return false;
+        }
+
+        if (avcodec_parameters_from_context(m_audio_stream->codecpar, m_audio_ctx) < 0)
+            return false;
+        m_audio_stream->time_base = m_audio_ctx->time_base;
+
+        // Resampler: Max delivers interleaved double at the DSP samplerate;
+        // the AAC encoder wants planar float at audio_samplerate.
+        AVChannelLayout in_layout;
+        av_channel_layout_default(&in_layout, kAudioChannels);
+        double dsp_sr = samplerate(); // from vector_operator<> base - current DSP samplerate
+        int    in_sr  = dsp_sr > 0 ? (int)std::lround(dsp_sr) : audio_samplerate.get();
+
+        m_source_samplerate = in_sr;
+
+        int ret = swr_alloc_set_opts2(
+            &m_swr_ctx,
+            &m_audio_ctx->ch_layout, AV_SAMPLE_FMT_FLTP, audio_samplerate,
+            &in_layout, AV_SAMPLE_FMT_DBL, in_sr,
+            0, nullptr
+        );
+        av_channel_layout_uninit(&in_layout);
+        if (ret < 0 || !m_swr_ctx || swr_init(m_swr_ctx) < 0) {
+            post_status("error could not initialize audio resampler");
+            return false;
+        }
+
+        m_audio_fifo = av_audio_fifo_alloc(AV_SAMPLE_FMT_FLTP, kAudioChannels, 1);
+        return m_audio_fifo != nullptr;
+    }
+
+    int m_source_samplerate = 48000;
+
+    void flush_encoder(AVCodecContext* ctx, AVStream* stream) {
+        if (!ctx)
+            return;
+        avcodec_send_frame(ctx, nullptr);
+        AVPacket* pkt = av_packet_alloc();
+        while (avcodec_receive_packet(ctx, pkt) == 0) {
+            write_packet(ctx, stream, pkt);
+        }
+        av_packet_free(&pkt);
+    }
+
+    void write_packet(AVCodecContext* ctx, AVStream* stream, AVPacket* pkt) {
+        pkt->stream_index = stream->index;
+        av_packet_rescale_ts(pkt, ctx->time_base, stream->time_base);
+        av_interleaved_write_frame(m_fmt_ctx, pkt);
+        av_packet_unref(pkt);
+    }
+
+    // -----------------------------------------------------------------
+    // Main encode/mux loop - single thread services both audio and video
+    // so calls into m_fmt_ctx are never concurrent.
+    // -----------------------------------------------------------------
+    void run_encode_loop() {
+        using clock = std::chrono::steady_clock;
+
+        double frame_dur_s   = 1.0 / std::max(1.0, (double)fps);
+        auto   frame_dur     = std::chrono::duration<double>(frame_dur_s);
+        auto   next_video_tick = clock::now();
+        int64_t video_pts_counter = 0;
+        int64_t audio_samples_written = 0;
+
+        const int aac_frame_size = m_audio_ctx->frame_size > 0 ? m_audio_ctx->frame_size : 1024;
+
+        std::vector<double> audio_scratch(4096 * kAudioChannels);
+        AVPacket* pkt = av_packet_alloc();
+
+        while (!m_stop_requested.load(std::memory_order_relaxed)) {
+            bool did_work = false;
+
+            // ---- Audio: drain whatever is available from the ring buffer ----
+            size_t avail = m_audio_ring.available_frames();
+            if (avail > 0) {
+                size_t to_read = std::min(avail, audio_scratch.size() / kAudioChannels);
+                size_t got     = m_audio_ring.read(audio_scratch.data(), to_read);
+                if (got > 0) {
+                    const uint8_t* in_data[1] = { (const uint8_t*)audio_scratch.data() };
+                    // swr needs a temp planar float output buffer sized for worst-case resample ratio
+                    int out_max = (int)av_rescale_rnd(got, audio_samplerate, m_source_samplerate, AV_ROUND_UP) + 32;
+
+                    uint8_t** converted = nullptr;
+                    av_samples_alloc_array_and_samples(&converted, nullptr, kAudioChannels, out_max, AV_SAMPLE_FMT_FLTP, 0);
+
+                    int converted_count = swr_convert(m_swr_ctx, converted, out_max, in_data, (int)got);
+                    if (converted_count > 0) {
+                        av_audio_fifo_write(m_audio_fifo, (void**)converted, converted_count);
+                    }
+                    av_freep(&converted[0]);
+                    av_freep(&converted);
+                    did_work = true;
+                }
+            }
+
+            while (av_audio_fifo_size(m_audio_fifo) >= aac_frame_size) {
+                AVFrame* aframe = av_frame_alloc();
+                aframe->nb_samples = aac_frame_size;
+                aframe->format     = AV_SAMPLE_FMT_FLTP;
+                av_channel_layout_copy(&aframe->ch_layout, &m_audio_ctx->ch_layout);
+                aframe->sample_rate = audio_samplerate;
+                av_frame_get_buffer(aframe, 0);
+
+                av_audio_fifo_read(m_audio_fifo, (void**)aframe->data, aac_frame_size);
+                aframe->pts = audio_samples_written;
+                audio_samples_written += aac_frame_size;
+
+                if (avcodec_send_frame(m_audio_ctx, aframe) == 0) {
+                    while (avcodec_receive_packet(m_audio_ctx, pkt) == 0)
+                        write_packet(m_audio_ctx, m_audio_stream, pkt);
+                }
+                av_frame_free(&aframe);
+                did_work = true;
+            }
+
+            // ---- Video: emit at a steady cadence, reusing the latest frame if none is new ----
+            auto now = clock::now();
+            if (now >= next_video_tick) {
+                AVFrame* to_encode = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(m_video_mutex);
+                    if (m_latest_video_frame) {
+                        to_encode = av_frame_alloc();
+                        av_frame_ref(to_encode, m_latest_video_frame);
+                    }
+                }
+                if (to_encode) {
+                    to_encode->pts = video_pts_counter++;
+                    if (avcodec_send_frame(m_video_ctx, to_encode) == 0) {
+                        while (avcodec_receive_packet(m_video_ctx, pkt) == 0)
+                            write_packet(m_video_ctx, m_video_stream, pkt);
+                    }
+                    av_frame_free(&to_encode);
+                }
+                next_video_tick += std::chrono::duration_cast<clock::duration>(frame_dur);
+                if (next_video_tick < now) // don't try to catch up after a stall
+                    next_video_tick = now + std::chrono::duration_cast<clock::duration>(frame_dur);
+                did_work = true;
+            }
+
+            if (!did_work)
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+
+        av_packet_free(&pkt);
+    }
+
+    void cleanup_ffmpeg() {
+        if (m_swr_ctx) { swr_free(&m_swr_ctx); }
+        if (m_audio_fifo) { av_audio_fifo_free(m_audio_fifo); m_audio_fifo = nullptr; }
+        if (m_video_ctx) { avcodec_free_context(&m_video_ctx); }
+        if (m_audio_ctx) { avcodec_free_context(&m_audio_ctx); }
+        if (m_fmt_ctx) {
+            if (m_fmt_ctx->pb && !(m_fmt_ctx->oformat->flags & AVFMT_NOFILE))
+                avio_closep(&m_fmt_ctx->pb);
+            avformat_free_context(m_fmt_ctx);
+            m_fmt_ctx = nullptr;
+        }
+        m_video_stream = nullptr;
+        m_audio_stream = nullptr;
+    }
+};
+
+MIN_EXTERNAL(rtmp_stream);

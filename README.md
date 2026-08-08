@@ -26,15 +26,15 @@ Built with [Min-API](https://github.com/Cycling74/min-api) (C++) and [FFmpeg](ht
 ## Building
 
 ```bash
-git clone <this-repo-url>
-cd RTMP-Max-Output
+git clone https://github.com/cju-media/jit.rtmp.git
+cd jit.rtmp
 cmake -S . -B build
 cmake --build build
 ```
 
 (`min-api`, including its bundled Max SDK, is vendored directly in this repo — no submodule init needed.)
 
-The built external lands at `build/externals/jit.rtmp.send~.mxo`. Copy or symlink it (and `patchers/`, if you want the example patch) into a package folder under your Max `Packages` directory, e.g. `~/Documents/Max 9/Packages/RTMP-Max-Output/externals/`.
+The built external lands at `build/externals/jit.rtmp.send~.mxo`. Copy or symlink it (and `patchers/`, if you want the example patch) into a package folder under your Max `Packages` directory, e.g. `~/Documents/Max 9/Packages/jit.rtmp/externals/`.
 
 > **Rebuilding?** Max only loads a given external's compiled code once per app launch — reopening a patch after a rebuild does *not* pick up new code. **Fully quit and relaunch Max** after every rebuild.
 

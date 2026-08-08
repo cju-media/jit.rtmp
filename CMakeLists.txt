@@ -9,6 +9,6 @@ if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
     set(CMAKE_OSX_ARCHITECTURES "${HOST_ARCH}" CACHE STRING "Build architecture" FORCE)
 endif()
 
-project(rtmp-max-output NONE)
+project(jit-rtmp NONE)
 
 add_subdirectory(jit.rtmp.send_tilde)

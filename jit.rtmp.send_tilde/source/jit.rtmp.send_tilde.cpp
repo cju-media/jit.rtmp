@@ -993,13 +993,32 @@ private:
     // -----------------------------------------------------------------
     // Main encode/mux loop - single thread services both audio and video
     // so calls into m_fmt_ctx are never concurrent.
+    //
+    // Video pacing is derived from the AUDIO clock (real samples actually
+    // consumed through the ring buffer, which tracks Max's real audio
+    // hardware clock), not from an independent wall-clock timer. A separate
+    // steady_clock-driven ticker for video would run at a very slightly
+    // different rate than the audio hardware's own sample clock - two
+    // physically different clock domains are never exactly the same speed,
+    // even by a tiny amount - and that mismatch accumulates into real,
+    // growing audio/video drift over a long enough session. Confirmed live:
+    // streaming through a local relay (jit.rtmp.server) that faithfully
+    // preserves whatever timestamps we hand it made this obvious within
+    // minutes, while it went unnoticed pushing straight to YouTube - almost
+    // certainly because YouTube's own ingest resyncs based on real arrival
+    // time server-side, silently masking the same underlying encoder bug
+    // rather than it not existing. Deriving video's cadence from actual
+    // elapsed audio time instead means there is only one clock in play, so
+    // the two streams can't drift apart by construction. A wall-clock
+    // fallback is used only before any real audio has arrived yet (e.g. the
+    // first instant after 'start', or if DSP is silent), so video isn't
+    // stuck waiting on audio that may never come.
     // -----------------------------------------------------------------
     void run_encode_loop() {
         using clock = std::chrono::steady_clock;
 
-        double frame_dur_s   = 1.0 / std::max(1.0, (double)fps);
-        auto   frame_dur     = std::chrono::duration<double>(frame_dur_s);
-        auto   next_video_tick = clock::now();
+        double  fps_val = std::max(1.0, (double)fps);
+        auto    encode_loop_start = clock::now(); // wall-clock fallback reference - see comment above
         int64_t video_pts_counter = 0;
         int64_t audio_samples_written = 0;
 
@@ -1054,9 +1073,21 @@ private:
                 did_work = true;
             }
 
-            // ---- Video: emit at a steady cadence, reusing the latest frame if none is new ----
-            auto now = clock::now();
-            if (now >= next_video_tick) {
+            // ---- Video: emit whenever the AUDIO clock says we're due for the next
+            // frame, reusing the latest frame if none is new - see the run_encode_loop()
+            // comment above for why audio (not an independent wall-clock timer) drives
+            // this. Before any real audio has arrived yet, fall back to wall-clock
+            // elapsed time so video isn't stuck waiting on audio that may never come.
+            double elapsed_s = (audio_samples_written > 0)
+                ? (double)audio_samples_written / (double)audio_samplerate
+                : std::chrono::duration<double>(clock::now() - encode_loop_start).count();
+
+            int64_t target_video_frame = (int64_t)(elapsed_s * fps_val);
+            if (target_video_frame > video_pts_counter) {
+                // Emit at most one frame per loop iteration even if we're behind by more
+                // than one frame's worth (e.g. after a stall) - the loop iterates every
+                // ~2ms when idle, so catching up a small backlog happens smoothly over a
+                // few iterations rather than bursting several frames through at once.
                 AVFrame* to_encode = nullptr;
                 {
                     std::lock_guard<std::mutex> lock(m_video_mutex);
@@ -1082,9 +1113,6 @@ private:
                     }
                     av_frame_free(&to_encode);
                 }
-                next_video_tick += std::chrono::duration_cast<clock::duration>(frame_dur);
-                if (next_video_tick < now) // don't try to catch up after a stall
-                    next_video_tick = now + std::chrono::duration_cast<clock::duration>(frame_dur);
                 did_work = true;
             }
 

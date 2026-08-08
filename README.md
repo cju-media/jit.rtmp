@@ -1,4 +1,4 @@
-# rtmp.stream~
+# jit.rtmp.send~
 
 A [Max](https://cycling74.com/products/max) external that streams live MSP audio and Jitter video straight out of a patch to an RTMP server — YouTube, Twitch, a self-hosted [nginx-rtmp](https://github.com/arut/nginx-rtmp-module)/[MediaMTX](https://github.com/bluenviron/mediamtx) server, or anything else that speaks RTMP — as a standard H.264/AAC/FLV stream. No intermediate screen-capture app, no virtual audio cable — Max talks to the encoder directly.
 
@@ -34,16 +34,16 @@ cmake --build build
 
 (`min-api`, including its bundled Max SDK, is vendored directly in this repo — no submodule init needed.)
 
-The built external lands at `build/externals/rtmp.stream~.mxo`. Copy or symlink it (and `patchers/`, if you want the example patch) into a package folder under your Max `Packages` directory, e.g. `~/Documents/Max 9/Packages/RTMP-Max-Output/externals/`.
+The built external lands at `build/externals/jit.rtmp.send~.mxo`. Copy or symlink it (and `patchers/`, if you want the example patch) into a package folder under your Max `Packages` directory, e.g. `~/Documents/Max 9/Packages/RTMP-Max-Output/externals/`.
 
 > **Rebuilding?** Max only loads a given external's compiled code once per app launch — reopening a patch after a rebuild does *not* pick up new code. **Fully quit and relaunch Max** after every rebuild.
 
-An example patch demonstrating both video paths and MC audio is at [`patchers/rtmp.stream~.test.maxpat`](patchers/rtmp.stream~.test.maxpat).
+An example patch demonstrating both video paths and MC audio is at [`patchers/jit.rtmp.send~.test.maxpat`](patchers/jit.rtmp.send~.test.maxpat).
 
 ## Quick start
 
 ```
-[adc~ 1 2] → [mc.pack~ 2] → (right inlet) [rtmp.stream~] → (left inlet, message) [print]
+[adc~ 1 2] → [mc.pack~ 2] → (right inlet) [jit.rtmp.send~] → (left inlet, message) [print]
 [jit.grab] ──────────────────────────────→ (left inlet)
 ```
 

@@ -124,7 +124,7 @@
                     "numinlets": 1,
                     "numoutlets": 0,
                     "patching_rect": [ 30.0, 20.0, 600.0, 22.0 ],
-                    "text": "rtmp.stream~ test patch - set the url below, then click start"
+                    "text": "jit.rtmp.send~ test patch - set the url below, then click start"
                 }
             },
             {
@@ -179,7 +179,7 @@
                     "numoutlets": 1,
                     "outlettype": [ "" ],
                     "patching_rect": [ 34.0, 300.0, 80.0, 22.0 ],
-                    "text": "rtmp.stream~"
+                    "text": "jit.rtmp.send~"
                 }
             },
             {
@@ -189,7 +189,7 @@
                     "numinlets": 1,
                     "numoutlets": 0,
                     "patching_rect": [ 30.0, 350.0, 150.0, 22.0 ],
-                    "text": "print rtmp.stream~"
+                    "text": "print jit.rtmp.send~"
                 }
             },
             {

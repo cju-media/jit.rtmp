@@ -1,7 +1,7 @@
 # NOTE: the Max SDK's pretarget script derives the Max object name from THIS
 # DIRECTORY'S NAME (not from any project() call here) - it replaces a trailing
-# "_tilde" with "~", so the folder must be named "rtmp.stream_tilde" for the
-# built external to come out as "rtmp.stream~.mxo".
+# "_tilde" with "~", so the folder must be named "jit.rtmp.send_tilde" for the
+# built external to come out as "jit.rtmp.send~.mxo".
 
 set(MIN_API_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../min-api)
 set(C74_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/../externals")
@@ -17,7 +17,7 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
 )
 
 set(SOURCE_FILES
-    source/rtmp.stream_tilde.cpp
+    source/jit.rtmp.send_tilde.cpp
 )
 
 add_library(${PROJECT_NAME} MODULE ${SOURCE_FILES})

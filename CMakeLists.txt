@@ -11,4 +11,4 @@ endif()
 
 project(rtmp-max-output NONE)
 
-add_subdirectory(rtmp.stream_tilde)
+add_subdirectory(jit.rtmp.send_tilde)

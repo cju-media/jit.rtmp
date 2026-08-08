@@ -1,5 +1,5 @@
 /// @file
-/// rtmp.stream~ - Stream MSP audio + Jitter video to an RTMP server.
+/// jit.rtmp.send~ - Stream MSP audio + Jitter video to an RTMP server.
 ///
 /// Encodes incoming audio (stereo signal inlets) with AAC and incoming video
 /// (jit_matrix messages) with H.264, muxes them into FLV, and pushes the result
@@ -127,7 +127,7 @@ private:
 
 } // namespace
 
-class rtmp_stream : public object<rtmp_stream>, public mc_operator<> {
+class jit_rtmp_send : public object<jit_rtmp_send>, public mc_operator<> {
 public:
     MIN_DESCRIPTION { "Stream MSP audio and Jitter video to an RTMP server as H.264/AAC/FLV." };
     MIN_TAGS { "audio, video, streaming, rtmp" };
@@ -138,7 +138,7 @@ public:
     inlet<>  in_audio_mc { this, "(multichannelsignal) audio in - any channel count, downmixed to stereo for the stream" };
     outlet<> out_status  { this, "(anything) status / error messages" };
 
-    rtmp_stream(const atoms& args = {}) {
+    jit_rtmp_send(const atoms& args = {}) {
         if (!args.empty())
             url = args[0];
         m_status_queue_ptr = std::make_unique<queue<>>(this, MIN_FUNCTION {
@@ -157,7 +157,7 @@ public:
         });
     }
 
-    ~rtmp_stream() {
+    ~jit_rtmp_send() {
         stop_streaming();
     }
 
@@ -519,11 +519,12 @@ private:
     }
 
     // Lazily create (once per streaming session) a hidden jit.gl.asyncread
-    // instance in our own patcher, configured to output matrices, and wire
-    // its outlet 0 directly into our own inlet 0 with a hidden patchline -
-    // equivalent to the user patching `jit.gl.asyncread -> rtmp.stream~` by
-    // hand, just done for them. Returns false (and posts a status message)
-    // if any step fails, e.g. because we can't resolve our owning patcher.
+    // instance in our own patcher, configured to output matrices - equivalent
+    // to the user patching `jit.gl.asyncread -> jit.rtmp.send~` by hand, just
+    // done for them (its output is read back via polling, not a patch cord -
+    // see poll_gl_asyncread_frame()). Returns false (and posts a status
+    // message) if any step fails, e.g. because we can't resolve our owning
+    // patcher.
     //
     // If drawto_context is non-empty, the helper targets that named jit.gl
     // context directly (@drawto) and reads its whole composited framebuffer
@@ -653,7 +654,7 @@ private:
             // so audio is silently never encoded (confirmed live: this alone was enough
             // to make the whole stream appear to never actually play on the far end,
             // not just be silent - see git log).
-            cerr << "rtmp.stream~: DSP is off - turn on audio (e.g. click an ezdac~, or "
+            cerr << "jit.rtmp.send~: DSP is off - turn on audio (e.g. click an ezdac~, or "
                  << "send \"start\" to a dac~) before sending 'start'. Refusing to start." << endl;
             post_status("error DSP is off - turn on audio before starting");
             return;
@@ -715,7 +716,7 @@ private:
     }
 
     static int interrupt_cb(void* ctx) {
-        auto* self = static_cast<rtmp_stream*>(ctx);
+        auto* self = static_cast<jit_rtmp_send*>(ctx);
         return self->m_stop_requested.load(std::memory_order_relaxed) ? 1 : 0;
     }
 
@@ -1110,4 +1111,4 @@ private:
     }
 };
 
-MIN_EXTERNAL(rtmp_stream);
+MIN_EXTERNAL(jit_rtmp_send);

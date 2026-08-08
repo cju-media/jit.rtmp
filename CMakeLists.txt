@@ -12,3 +12,5 @@ endif()
 project(jit-rtmp NONE)
 
 add_subdirectory(jit.rtmp.send_tilde)
+add_subdirectory(jit.rtmp.receive_tilde)
+add_subdirectory(jit.rtmp.server)

@@ -28,9 +28,17 @@ cmake --build build
 
 (`min-api`, including its bundled Max SDK, is vendored directly in this repo — no submodule init needed.)
 
-All three externals build in one pass and land at `build/externals/jit.rtmp.send~.mxo`, `build/externals/jit.rtmp.receive~.mxo`, and `build/externals/jit.rtmp.server.mxo`. Copy or symlink them (and `patchers/`, if you want the example patches) into a package folder under your Max `Packages` directory, e.g. `~/Documents/Max 9/Packages/jit.rtmp/externals/`.
+All three externals build in one pass and land at `build/externals/jit.rtmp.send~.mxo`, `build/externals/jit.rtmp.receive~.mxo`, and `build/externals/jit.rtmp.server.mxo`, alongside generated ref-page docs at `build/docs/*.maxref.xml`. Copy or symlink `build/externals/`, `build/docs/`, and `patchers/` (if you want the example patches) into a package folder under your Max `Packages` directory, e.g.:
 
-> **Rebuilding?** Max only loads a given external's compiled code once per app launch — reopening a patch after a rebuild does *not* pick up new code. **Fully quit and relaunch Max** after every rebuild.
+```
+~/Documents/Max 9/Packages/jit.rtmp/externals/  -> build/externals/
+~/Documents/Max 9/Packages/jit.rtmp/docs/       -> build/docs/
+~/Documents/Max 9/Packages/jit.rtmp/patchers/   -> patchers/
+```
+
+Skipping `docs/` still lets the externals load, but the objects won't show digest/description text (or show up at all) in the object box's autofill popup. If you symlink rather than copy, use real symlinks (`ln -s`) — a Finder-made alias isn't a directory as far as Max's package scanner is concerned, so it won't be traversed.
+
+> **Rebuilding?** Max only loads a given external's compiled code once per app launch — reopening a patch after a rebuild does *not* pick up new code. **Fully quit and relaunch Max** after every rebuild. If you're adding a *new* object for the first time (not just rebuilding one you already had), also run **Options → Rebuild the Max File Search Database** after relaunching — Max caches the object/autocomplete database and won't otherwise notice the new object.
 
 > **First build needs internet access.** `jit.rtmp.server` bundles a real [MediaMTX](https://github.com/bluenviron/mediamtx) binary — CMake downloads and checksum-verifies the right one for your Mac the first time you configure the project, then caches it in `build/` (no re-download on later builds). If that download fails (offline, firewall, etc.), the build still succeeds — `jit.rtmp.server` just comes up without a bundled binary until you either fix connectivity and reconfigure, or point its `@mediamtx_path` attribute at your own install.
 

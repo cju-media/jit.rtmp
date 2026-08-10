@@ -28,15 +28,30 @@ cmake --build build
 
 (`min-api`, including its bundled Max SDK, is vendored directly in this repo — no submodule init needed.)
 
-All three externals build in one pass and land at `build/externals/jit.rtmp.send~.mxo`, `build/externals/jit.rtmp.receive~.mxo`, and `build/externals/jit.rtmp.server.mxo`, alongside generated ref-page docs at `build/docs/*.maxref.xml`. Copy or symlink `build/externals/`, `build/docs/`, and `patchers/` (if you want the example patches) into a package folder under your Max `Packages` directory, e.g.:
+This assembles a complete Max package at `build/jit.rtmp/` — an `externals/`
+folder with all three built objects (`jit.rtmp.send~.mxo`,
+`jit.rtmp.receive~.mxo`, `jit.rtmp.server.mxo`), a live symlink to the
+authored `patchers/`, and a generated `package-info.json`. That directory *is*
+the package, so installing it is one symlink:
 
-```
-~/Documents/Max 9/Packages/jit.rtmp/externals/  -> build/externals/
-~/Documents/Max 9/Packages/jit.rtmp/docs/       -> build/docs/
-~/Documents/Max 9/Packages/jit.rtmp/patchers/   -> patchers/
+```bash
+ln -s "$(pwd)/build/jit.rtmp" ~/Documents/"Max 9"/Packages/jit.rtmp
 ```
 
-Skipping `docs/` still lets the externals load, but the objects won't show digest/description text (or show up at all) in the object box's autofill popup. If you symlink rather than copy, use real symlinks (`ln -s`) — a Finder-made alias isn't a directory as far as Max's package scanner is concerned, so it won't be traversed.
+Nothing needs re-copying after a rebuild, and if a `docs/`, `help/`, `extras/`,
+`media/` or `init/` folder is ever added to the repo, the next configure picks
+it up automatically.
+
+`build` is a symlink to `build.nosync`, which is where the output actually
+lands — this repo lives under `~/Documents`, and iCloud's file provider races
+with CMake's rapid directory create/rename/delete, leaving empty duplicate
+directories behind (`CMakeFiles 2`, `jit 2.rtmp`, ...) unless the real build
+directory is named so iCloud skips it. **To wipe the build:**
+`rm -rf build.nosync && mkdir build.nosync`, not just `rm -rf build.nosync`
+alone — that leaves `build` a dangling symlink, and CMake's directory
+bootstrap does not follow a dangling symlink to create what it points at, so
+the next `cmake -B build` fails with an unrelated-looking `pkgRedirects`
+error.
 
 > **Rebuilding?** Max only loads a given external's compiled code once per app launch — reopening a patch after a rebuild does *not* pick up new code. **Fully quit and relaunch Max** after every rebuild. If you're adding a *new* object for the first time (not just rebuilding one you already had), also run **Options → Rebuild the Max File Search Database** after relaunching — Max caches the object/autocomplete database and won't otherwise notice the new object.
 

@@ -4,7 +4,12 @@
 # built external to come out as "jit.rtmp.send~.mxo".
 
 set(MIN_API_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../min-api)
-set(C74_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/../externals")
+# The package directory is defined by the top-level CMakeLists; fall back to a
+# sensible local path if this project is ever configured on its own.
+if(NOT DEFINED C74_EXTERNALS_DIR)
+    set(C74_EXTERNALS_DIR "${CMAKE_CURRENT_BINARY_DIR}/../jit.rtmp/externals")
+endif()
+set(C74_LIBRARY_OUTPUT_DIRECTORY "${C74_EXTERNALS_DIR}")
 include(${MIN_API_DIR}/script/min-pretarget.cmake)
 
 find_package(PkgConfig REQUIRED)

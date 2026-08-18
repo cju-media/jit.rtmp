@@ -57,6 +57,114 @@ error.
 
 > **First build needs internet access.** `jit.rtmp.server` bundles a real [MediaMTX](https://github.com/bluenviron/mediamtx) binary — CMake downloads and checksum-verifies the right one for your Mac the first time you configure the project, then caches it in `build/` (no re-download on later builds). If that download fails (offline, firewall, etc.), the build still succeeds — `jit.rtmp.server` just comes up without a bundled binary until you either fix connectivity and reconfigure, or point its `@mediamtx_path` attribute at your own install.
 
+### Universal (Apple Silicon + Intel) builds
+
+The instructions above build only for the Mac you run them on — Homebrew's
+FFmpeg ships dylibs for whichever single architecture that Homebrew install
+itself runs as, never both, so a plain `cmake -B build` on an Apple Silicon
+Mac produces an arm64-only package that won't load on an Intel Mac (and
+vice versa).
+
+To build a single package that runs on both, you need a *second* Homebrew
+install for the other architecture, running under Rosetta if you're doing
+this on Apple Silicon:
+
+```bash
+softwareupdate --install-rosetta --agree-to-license
+arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+arch -x86_64 /usr/local/bin/brew install ffmpeg pkg-config
+```
+
+(If you're building on an Intel Mac instead, it's the same idea in reverse —
+you'd need an arm64 Homebrew, which needs Apple Silicon to run at all; in
+practice, building the universal package on Apple Silicon is the only side
+that actually works standalone.)
+
+With both Homebrews in place, one script does the rest — two single-arch
+configure+build passes (one against each Homebrew) and a `lipo -create` merge
+of the results, including the bundled `mediamtx` binary:
+
+```bash
+./scripts/build-universal.sh
+```
+
+The merged, universal package lands at `build/jit.rtmp` — install it the same
+way as any other build (see above). Homebrew's dylibs are referenced by
+absolute path per-architecture (`/opt/homebrew/...` in the arm64 slice,
+`/usr/local/...` in the x86_64 slice), so this only actually runs on another
+machine if *that* machine also has a matching-architecture FFmpeg installed
+at the matching prefix — see "Known limitations" below.
+
+If your Homebrews live somewhere other than the default `/opt/homebrew`
+(arm64) / `/usr/local` (x86_64) prefixes, point the script at them with
+`JIT_RTMP_ARM64_HOMEBREW` / `JIT_RTMP_X86_64_HOMEBREW` environment variables.
+
+**Watch out:** a plain `cmake --build build` afterward (e.g. while iterating
+on source) writes to that same `build/jit.rtmp` and only ever produces a
+single-arch binary, so it will silently turn a universal package back into a
+single-arch one. The build prints a warning if this is about to happen
+(`warning: ... is currently universal (...) but this build only targets
+(...)`) - re-run `./scripts/build-universal.sh` afterward if you see it and
+want the universal package back.
+
+`build-universal.sh` verifies its own output before reporting success - it
+lipo-inspects every binary that matters (each external, plus the bundled
+`mediamtx`) and fails loudly if any of them didn't actually end up universal,
+rather than silently shipping a partial merge. You can also run that check
+by hand at any time, e.g. right before handing the package to someone else,
+or just to confirm what's currently installed:
+
+```bash
+./scripts/check-universal.sh
+```
+
+(defaults to checking `build/jit.rtmp`; pass a different path to check
+elsewhere.)
+
+#### Running a universal build on another machine
+
+A universal `.mxo` still links against FFmpeg by absolute, per-architecture
+path (`/opt/homebrew/...` for the arm64 slice, `/usr/local/...` for the
+x86_64 slice) - lipo-merging the binary doesn't change that. So whatever
+Mac actually *runs* the build - not just the one that built it - needs its
+own matching Homebrew FFmpeg install, or `jit.rtmp.send~`/`jit.rtmp.receive~`
+will fail to load with something like:
+
+```
+jit.rtmp.send~: unable to load object bundle executable: The bundle
+"jit.rtmp.send~.mxo" couldn't be loaded.
+```
+
+On an **Intel Mac**, that means a native (non-Rosetta) Homebrew at its
+standard `/usr/local` prefix:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+```bash
+brew install ffmpeg
+```
+
+On an **Apple Silicon Mac**, the same idea at `/opt/homebrew`:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+```bash
+brew install ffmpeg
+```
+
+(This is a separate step from the build-machine setup above - that one
+installs a *second*, Rosetta-based Homebrew alongside your normal one so a
+single Mac can build both architectures. A machine that's only ever going
+to *run* the result just needs its own single, native Homebrew FFmpeg.)
+
+If a Standalone application built from this package still fails to load the
+externals after that, double check the Standalone itself actually contains
+a universal binary and wasn't built from a stale, already-loaded copy - see
+the `.mxo` rebuild note above about fully quitting and relaunching Max
+before rebuilding.
+
 ---
 
 ## jit.rtmp.send~
@@ -126,7 +234,7 @@ The outlet reports status and errors as messages: `status connecting`, `status l
 
 ### Known limitations
 
-- **Distribution**: the built `.mxo` links against your local FFmpeg install by absolute path. Fine on your own machine; sharing the patch with someone else requires them to install FFmpeg too, or the dylibs need to be bundled into the `.mxo` and re-pathed (e.g. with `dylibbundler`) first.
+- **Distribution**: the built `.mxo` links against your local FFmpeg install by absolute path (per-architecture, see "Universal builds" above). Fine on your own machine(s); sharing the patch with someone else requires them to install FFmpeg too (Homebrew, at the standard prefix for their Mac's architecture), or the dylibs need to be bundled into the `.mxo` and re-pathed (e.g. with `dylibbundler`) first.
 - **Stereo output only**: input audio accepts any channel count via MC, but it's always downmixed to stereo before encoding.
 - **Video format**: only char ARGB/RGB `jit_matrix` data is handled (this includes what the internal GL helper produces — it outputs a regular char matrix too).
 - One `jit.gl.*` render source per stream at a time (see "How it works" above) — no compositing of multiple GL contexts.

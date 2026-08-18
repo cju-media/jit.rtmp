@@ -1,12 +1,40 @@
 cmake_minimum_required(VERSION 3.19)
 
-# Homebrew's FFmpeg on Apple Silicon ships arm64-only dylibs. The Max SDK's
-# pretarget script defaults CMAKE_OSX_ARCHITECTURES to x86_64 when unset, which
-# would fail to link against them, so pin to the native arch before any
-# project() call happens (including the one inside min-pretarget.cmake).
+# Homebrew's FFmpeg ships dylibs for whatever single arch that particular
+# Homebrew install itself runs as (arm64-only on Apple Silicon's native
+# Homebrew, x86_64-only on an Intel/Rosetta one) - never both. The Max SDK's
+# pretarget script defaults CMAKE_OSX_ARCHITECTURES to x86_64 when unset,
+# which would fail to link against an arm64-only FFmpeg, so pin to the native
+# arch before any project() call happens (including the one inside
+# min-pretarget.cmake) unless the caller already asked for a specific one
+# (e.g. scripts/build-universal.sh, which configures arm64 and x86_64
+# separately and lipo's the results - see that script and
+# JIT_RTMP_HOMEBREW_PREFIX below for how each single-arch build finds the
+# right FFmpeg).
 if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
     execute_process(COMMAND uname -m OUTPUT_VARIABLE HOST_ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
     set(CMAKE_OSX_ARCHITECTURES "${HOST_ARCH}" CACHE STRING "Build architecture" FORCE)
+endif()
+
+# Make sure pkg-config (used by the two "_tilde" externals to find FFmpeg)
+# resolves it from the Homebrew prefix that actually matches
+# CMAKE_OSX_ARCHITECTURES, rather than whatever's first on the ambient
+# PKG_CONFIG_PATH - on a machine with both a native and a Rosetta Homebrew
+# installed (see scripts/build-universal.sh), that ambient order is
+# unspecified and would risk linking the wrong arch's dylibs, or just failing
+# to find any. /opt/homebrew is Homebrew's own standard arm64 prefix and
+# /usr/local its standard x86_64 (Intel-native or Rosetta) prefix; override
+# JIT_RTMP_HOMEBREW_PREFIX if yours lives somewhere else.
+if(APPLE)
+    if(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+        set(_jit_rtmp_default_homebrew "/usr/local")
+    else()
+        set(_jit_rtmp_default_homebrew "/opt/homebrew")
+    endif()
+    set(JIT_RTMP_HOMEBREW_PREFIX "${_jit_rtmp_default_homebrew}" CACHE PATH
+        "Homebrew prefix to resolve FFmpeg from for this arch")
+    set(ENV{PKG_CONFIG_LIBDIR} "${JIT_RTMP_HOMEBREW_PREFIX}/lib/pkgconfig:${JIT_RTMP_HOMEBREW_PREFIX}/share/pkgconfig")
+    message(STATUS "jit.rtmp: resolving FFmpeg (${CMAKE_OSX_ARCHITECTURES}) from ${JIT_RTMP_HOMEBREW_PREFIX}")
 endif()
 
 project(jit-rtmp NONE)

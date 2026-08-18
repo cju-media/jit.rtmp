@@ -1,3 +1,6 @@
+# `build` is a symlink (not a directory), so the trailing-slash `build/`
+# pattern below doesn't actually match it - list it bare too.
+build
 build/
 # The real build directory. iCloud Drive syncs ~/Documents, and its file
 # provider races with CMake's rapid directory create/rename/delete, resolving
@@ -5,5 +8,10 @@ build/
 # iCloud skips anything whose name ends in .nosync, so the real directory is
 # build.nosync/ and `build` is a symlink to it - `cmake -B build` still works.
 build.nosync/
+# Per-arch scratch build dirs used by scripts/build-universal.sh (same
+# iCloud-dodging .nosync naming as above) - lipo's final output still lands
+# in build.nosync/, these two are just intermediate single-arch builds.
+build-arm64.nosync/
+build-x86_64.nosync/
 *.mxo
 .DS_Store

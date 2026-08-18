@@ -89,3 +89,14 @@ if(APPLE)
 endif()
 
 include(${MIN_API_DIR}/script/min-posttarget.cmake)
+
+# Warn (don't fail) if this rebuild is about to silently replace a universal
+# binary (main binary and/or the bundled mediamtx) - assembled by
+# scripts/build-universal.sh - with a single-arch one.
+if(APPLE)
+    add_custom_command(TARGET ${PROJECT_NAME} PRE_LINK
+        COMMAND "${CMAKE_SOURCE_DIR}/scripts/warn-if-clobbering-universal.sh"
+            "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>" "${CMAKE_OSX_ARCHITECTURES}"
+        VERBATIM
+    )
+endif()
